@@ -5,13 +5,18 @@ struct WeeklyView: View {
     @ObservedObject var viewModel: WeeklyViewModel
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
+    @State private var guideInteraction: WeeklyGuideInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
+    @State private var verticalViewportHeight: CGFloat = 0
+    @StateObject private var verticalScrollBridge = WeeklyScrollViewBridge()
 
     private let hourHeight: CGFloat = 72
     private let timeColumnWidth: CGFloat = 58
     private let dayColumnWidth: CGFloat = 178
     private let selectionSlotMinutes = 30
     private let longPressDuration = 0.25
+    private let autoScrollEdgeThreshold: CGFloat = 64
+    private let autoScrollStep: CGFloat = 10
 
     init(viewModel: WeeklyViewModel, calendar: Calendar = .current) {
         self.viewModel = viewModel
@@ -27,14 +32,6 @@ struct WeeklyView: View {
                 VStack(spacing: 16) {
                     header
 
-                    if let guideState {
-                        SelectionTimeHeaderView(
-                            selectedDate: guideState.date,
-                            calendar: calendar
-                        )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-
                     if viewModel.isLoading && viewModel.sections.isEmpty {
                         ProgressView("Loading week...")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -44,6 +41,22 @@ struct WeeklyView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
+
+                if let guideState {
+                    VStack {
+                        SelectionTimeHeaderView(
+                            selectedDate: guideState.date,
+                            calendar: calendar
+                        )
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .allowsHitTesting(false)
+
+                        Spacer()
+                    }
+                    .transition(.opacity)
+                    .zIndex(10)
+                }
             }
             .navigationTitle("Weekly")
             .navigationBarTitleDisplayMode(.inline)
@@ -75,6 +88,14 @@ struct WeeklyView: View {
             }
             .task {
                 viewModel.onAppear()
+            }
+            .task(id: autoScrollDirection) {
+                guard let direction = autoScrollDirection else { return }
+
+                while !Task.isCancelled && autoScrollDirection == direction && guideInteraction != nil {
+                    scrollTimeline(in: direction, step: autoScrollStep)
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
             }
         }
     }
@@ -128,8 +149,9 @@ struct WeeklyView: View {
                 }
                 .background(CalendarColor.cardBackground)
 
-                ScrollView(.vertical, showsIndicators: true) {
-                    ObservableScrollView {
+                ObservableScrollView(
+                    bridge: verticalScrollBridge,
+                    content: {
                         HStack(alignment: .top, spacing: 0) {
                             TimeColumnView(
                                 calendar: calendar,
@@ -151,21 +173,26 @@ struct WeeklyView: View {
                                     guideState: guideState,
                                     scrollOffsetY: timelineScrollOffset,
                                     onGuideStart: { point in
+                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
                                         withAnimation(.easeOut(duration: 0.12)) {
                                             guideState = makeGuideState(from: point, fallbackIndex: index)
                                         }
                                     },
                                     onGuideChange: { point in
+                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
                                         guideState = makeGuideState(from: point, fallbackIndex: index)
                                     },
                                     onGuideCommit: { point in
+                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
                                         let quantized = makeGuideState(from: point, fallbackIndex: index)
+                                        guideInteraction = nil
                                         withAnimation(.easeOut(duration: 0.12)) {
                                             guideState = nil
                                         }
                                         viewModel.openNewEvent(at: quantized.date)
                                     },
                                     onGuideCancel: {
+                                        guideInteraction = nil
                                         withAnimation(.easeOut(duration: 0.12)) {
                                             guideState = nil
                                         }
@@ -174,10 +201,15 @@ struct WeeklyView: View {
                                 )
                             }
                         }
-                    } onOffsetChange: { newOffset in
+                    },
+                    onOffsetChange: { newOffset in
                         timelineScrollOffset = newOffset
+                        refreshGuideStateIfNeeded()
+                    },
+                    onViewportHeightChange: { viewportHeight in
+                        verticalViewportHeight = viewportHeight
                     }
-                }
+                )
             }
             .background(CalendarColor.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -208,6 +240,24 @@ struct WeeklyView: View {
         return { viewModel.deleteCurrentEvent() }
     }
 
+    private var autoScrollDirection: WeeklyAutoScrollDirection? {
+        guard let interaction = guideInteraction, verticalViewportHeight > 0 else {
+            return nil
+        }
+
+        let viewportY = interaction.point.y - timelineScrollOffset
+
+        if viewportY < autoScrollEdgeThreshold {
+            return .up
+        }
+
+        if viewportY > verticalViewportHeight - autoScrollEdgeThreshold {
+            return .down
+        }
+
+        return nil
+    }
+
     private func makeGuideState(from point: CGPoint, fallbackIndex: Int) -> WeeklySelectionGuide {
         let effectiveDayWidth = max(dayColumnWidth, 1)
         let rawDayIndex = Int(floor(point.x / effectiveDayWidth))
@@ -215,7 +265,7 @@ struct WeeklyView: View {
         let resolvedIndex = viewModel.sections.indices.contains(clampedDayIndex) ? clampedDayIndex : fallbackIndex
         let resolvedSection = viewModel.sections[resolvedIndex]
 
-        let visibleY = max(point.y + timelineScrollOffset, 0)
+        let visibleY = max(point.y, 0)
         let maxMinutes = 24 * 60 - selectionSlotMinutes
         let rawMinutes = Int((visibleY / hourHeight) * 60)
         let quantizedMinutes = ((rawMinutes / selectionSlotMinutes) * selectionSlotMinutes).clamped(to: 0...maxMinutes)
@@ -233,6 +283,33 @@ struct WeeklyView: View {
             date: selectedDate,
             minuteOfDay: quantizedMinutes
         )
+    }
+
+    private func refreshGuideStateIfNeeded() {
+        guard let interaction = guideInteraction else { return }
+        guideState = makeGuideState(from: interaction.point, fallbackIndex: interaction.fallbackIndex)
+    }
+
+    private func scrollTimeline(in direction: WeeklyAutoScrollDirection, step: CGFloat) {
+        guard let scrollView = verticalScrollBridge.scrollView else { return }
+
+        let currentOffset = scrollView.contentOffset.y
+        let maxOffset = max(scrollView.contentSize.height - scrollView.bounds.height, 0)
+        let delta = direction == .up ? -step : step
+        let targetOffset = max(0, min(currentOffset + delta, maxOffset))
+        let appliedDelta = targetOffset - currentOffset
+
+        guard abs(targetOffset - currentOffset) > .ulpOfOne else { return }
+
+        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetOffset), animated: false)
+        timelineScrollOffset = targetOffset
+        if let interaction = guideInteraction {
+            guideInteraction = WeeklyGuideInteraction(
+                point: CGPoint(x: interaction.point.x, y: interaction.point.y + appliedDelta),
+                fallbackIndex: interaction.fallbackIndex
+            )
+        }
+        refreshGuideStateIfNeeded()
     }
 }
 
@@ -719,15 +796,21 @@ private struct LongPressCaptureView: UIViewRepresentable {
 }
 
 private struct ObservableScrollView<Content: View>: View {
+    let bridge: WeeklyScrollViewBridge
     let content: () -> Content
     let onOffsetChange: (CGFloat) -> Void
+    let onViewportHeightChange: (CGFloat) -> Void
 
     init(
+        bridge: WeeklyScrollViewBridge,
         @ViewBuilder content: @escaping () -> Content,
-        onOffsetChange: @escaping (CGFloat) -> Void
+        onOffsetChange: @escaping (CGFloat) -> Void,
+        onViewportHeightChange: @escaping (CGFloat) -> Void
     ) {
+        self.bridge = bridge
         self.content = content
         self.onOffsetChange = onOffsetChange
+        self.onViewportHeightChange = onViewportHeightChange
     }
 
     var body: some View {
@@ -740,10 +823,26 @@ private struct ObservableScrollView<Content: View>: View {
                     }
                 )
         }
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear {
+                        onViewportHeightChange(proxy.size.height)
+                    }
+                    .onChange(of: proxy.size.height) { _, newHeight in
+                        onViewportHeightChange(newHeight)
+                    }
+            }
+        )
         .coordinateSpace(name: "weeklyTimelineScroll")
         .onPreferenceChange(VerticalScrollOffsetPreferenceKey.self) { minY in
             onOffsetChange(-minY)
         }
+        .background(
+            ScrollViewResolverView { scrollView in
+                bridge.scrollView = scrollView
+            }
+        )
     }
 }
 
@@ -758,6 +857,72 @@ private struct VerticalScrollOffsetPreferenceKey: PreferenceKey {
 private extension Int {
     func clamped(to range: ClosedRange<Int>) -> Int {
         Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private enum WeeklyAutoScrollDirection: Hashable {
+    case up
+    case down
+}
+
+private struct WeeklyGuideInteraction {
+    let point: CGPoint
+    let fallbackIndex: Int
+}
+
+private final class WeeklyScrollViewBridge: ObservableObject {
+    weak var scrollView: UIScrollView?
+}
+
+private struct ScrollViewResolverView: UIViewRepresentable {
+    let onResolve: (UIScrollView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        DispatchQueue.main.async {
+            if let scrollView = view.enclosingVerticalScrollView() {
+                onResolve(scrollView)
+            }
+        }
+
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            if let scrollView = uiView.enclosingVerticalScrollView() {
+                onResolve(scrollView)
+            }
+        }
+    }
+}
+
+private extension UIView {
+    func enclosingVerticalScrollView() -> UIScrollView? {
+        var current: UIView? = superview
+        var candidates: [UIScrollView] = []
+
+        while let view = current {
+            if let scrollView = view as? UIScrollView {
+                scrollView.layoutIfNeeded()
+                candidates.append(scrollView)
+            }
+            current = view.superview
+        }
+
+        if let scrollingCandidate = candidates.first(where: {
+            $0.alwaysBounceVertical || $0.contentSize.height > ($0.bounds.height + 1)
+        }) {
+            return scrollingCandidate
+        }
+
+        if let fallbackVertical = candidates.first(where: { !$0.alwaysBounceHorizontal }) {
+            return fallbackVertical
+        }
+
+        return candidates.first
     }
 }
 
