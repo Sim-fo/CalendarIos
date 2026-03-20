@@ -210,17 +210,17 @@ struct WeeklyView: View {
                                             }
                                         },
                                         onEventTap: viewModel.openEditor(for:),
-                                        onEventMoveStart: { event, point in
-                                            beginEventMove(for: event, at: point, fallbackIndex: index)
+                                        onEventMoveStart: { event in
+                                            beginEventMove(for: event, fallbackIndex: index)
                                         },
-                                        onEventMoveChange: { event, point in
-                                            updateEventMove(for: event, at: point, fallbackIndex: index)
+                                        onEventMoveChange: { event, translation in
+                                            updateEventMove(for: event, translation: translation)
                                         },
-                                        onEventResizeStart: { event, point in
-                                            beginEventResize(for: event, at: point, fallbackIndex: index)
+                                        onEventResizeStart: { event in
+                                            beginEventResize(for: event, fallbackIndex: index)
                                         },
-                                        onEventResizeChange: { event, point in
-                                            updateEventResize(for: event, at: point, fallbackIndex: index)
+                                        onEventResizeChange: { event, translation in
+                                            updateEventResize(for: event, translation: translation)
                                         },
                                         onEventInteractionCommit: commitActiveEventInteraction,
                                         onEventInteractionCancel: cancelActiveEventInteraction
@@ -291,6 +291,9 @@ struct WeeklyView: View {
                 events.append(interaction.previewEvent)
                 events.sort { lhs, rhs in
                     if lhs.startAt == rhs.startAt {
+                        if lhs.durationMinutes == rhs.durationMinutes {
+                            return lhs.id < rhs.id
+                        }
                         return lhs.durationMinutes < rhs.durationMinutes
                     }
                     return lhs.startAt < rhs.startAt
@@ -313,33 +316,37 @@ struct WeeklyView: View {
         return { viewModel.deleteCurrentEvent() }
     }
 
-    private func beginEventMove(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
-        let anchorMinutes = Int((point.y / hourHeight) * 60).clamped(to: 0...max(event.durationMinutes - 1, 0))
+    private func beginEventMove(for event: CalendarEvent, fallbackIndex: Int) {
         activeEventInteraction = WeeklyEventInteraction(
             eventID: event.id,
             originalEvent: event,
             previewEvent: event,
-            mode: .move(anchorMinutes: anchorMinutes),
+            mode: .move(
+                originalDayIndex: fallbackIndex,
+                originalStartMinute: minuteOfDay(for: event.startAt)
+            ),
             fallbackIndex: fallbackIndex
         )
     }
 
-    private func updateEventMove(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+    private func updateEventMove(for event: CalendarEvent, translation: CGPoint) {
         guard var interaction = activeEventInteraction, interaction.eventID == event.id else { return }
-        let resolvedFallbackIndex = fallbackIndex
 
-        let anchorMinutes: Int
+        let originalDayIndex: Int
+        let originalStartMinute: Int
         switch interaction.mode {
-        case .move(let storedAnchorMinutes):
-            anchorMinutes = storedAnchorMinutes
+        case .move(let storedOriginalDayIndex, let storedOriginalStartMinute):
+            originalDayIndex = storedOriginalDayIndex
+            originalStartMinute = storedOriginalStartMinute
         case .resize:
             return
         }
 
-        let targetDayIndex = resolvedDayIndex(from: point.x, fallbackIndex: resolvedFallbackIndex)
-        let touchMinute = quantizedMinute(from: point.y, stepMinutes: manipulationSlotMinutes)
+        let dayShift = Int((translation.x / dayColumnWidth).rounded())
+        let minuteShift = quantizedDeltaMinutes(from: translation.y)
+        let targetDayIndex = (originalDayIndex + dayShift).clamped(to: 0...max(viewModel.sections.count - 1, 0))
         let maxStartMinute = max((24 * 60) - event.durationMinutes, 0)
-        let startMinute = (touchMinute - anchorMinutes).clamped(to: 0...maxStartMinute)
+        let startMinute = (originalStartMinute + minuteShift).clamped(to: 0...maxStartMinute)
         let startAt = date(for: targetDayIndex, minuteOfDay: startMinute)
 
         interaction.previewEvent = event.updating(startAt: startAt)
@@ -347,29 +354,33 @@ struct WeeklyView: View {
         activeEventInteraction = interaction
     }
 
-    private func beginEventResize(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+    private func beginEventResize(for event: CalendarEvent, fallbackIndex: Int) {
         let preview = event.updating(durationMinutes: max(minimumEventDurationMinutes, event.durationMinutes))
         activeEventInteraction = WeeklyEventInteraction(
             eventID: event.id,
             originalEvent: event,
             previewEvent: preview,
-            mode: .resize,
+            mode: .resize(originalDurationMinutes: event.durationMinutes),
             fallbackIndex: fallbackIndex
         )
-        updateEventResize(for: event, at: point, fallbackIndex: fallbackIndex)
     }
 
-    private func updateEventResize(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+    private func updateEventResize(for event: CalendarEvent, translation: CGPoint) {
         guard var interaction = activeEventInteraction, interaction.eventID == event.id else { return }
-        guard case .resize = interaction.mode else { return }
+        let originalDurationMinutes: Int
+        switch interaction.mode {
+        case .resize(let storedOriginalDurationMinutes):
+            originalDurationMinutes = storedOriginalDurationMinutes
+        case .move:
+            return
+        }
 
         let startMinute = minuteOfDay(for: interaction.previewEvent.startAt)
         let maxDuration = max((24 * 60) - startMinute, minimumEventDurationMinutes)
-        let endMinute = quantizedMinute(from: point.y, stepMinutes: manipulationSlotMinutes)
-        let duration = (endMinute - startMinute).clamped(to: minimumEventDurationMinutes...maxDuration)
+        let durationDelta = quantizedDeltaMinutes(from: translation.y)
+        let duration = (originalDurationMinutes + durationDelta).clamped(to: minimumEventDurationMinutes...maxDuration)
 
         interaction.previewEvent = interaction.previewEvent.updating(durationMinutes: duration)
-        interaction.fallbackIndex = fallbackIndex
         activeEventInteraction = interaction
     }
 
@@ -383,19 +394,19 @@ struct WeeklyView: View {
         activeEventInteraction = nil
     }
 
-    private func resolvedDayIndex(from x: CGFloat, fallbackIndex: Int) -> Int {
-        let effectiveDayWidth = max(dayColumnWidth, 1)
-        let rawDayIndex = Int(floor(x / effectiveDayWidth))
-        let maxIndex = max(viewModel.sections.count - 1, 0)
-        return rawDayIndex.clamped(to: 0...maxIndex)
-    }
-
     private func quantizedMinute(from y: CGFloat, stepMinutes: Int) -> Int {
         let step = max(stepMinutes, 1)
         let visibleY = max(y, 0)
         let rawMinute = Int((visibleY / hourHeight) * 60)
         let quantizedMinute = (rawMinute / step) * step
         return quantizedMinute.clamped(to: 0...(24 * 60))
+    }
+
+    private func quantizedDeltaMinutes(from deltaY: CGFloat) -> Int {
+        let step = max(manipulationSlotMinutes, 1)
+        let rawMinuteDelta = Int(((deltaY / hourHeight) * 60).rounded())
+        let snapped = Int((Double(rawMinuteDelta) / Double(step)).rounded()) * step
+        return snapped
     }
 
     private func date(for dayIndex: Int, minuteOfDay: Int) -> Date {
@@ -601,9 +612,9 @@ private struct WeeklyTimelineDayColumn: View {
     let onGuideCommit: (CGPoint) -> Void
     let onGuideCancel: () -> Void
     let onEventTap: (CalendarEvent) -> Void
-    let onEventMoveStart: (CalendarEvent, CGPoint) -> Void
+    let onEventMoveStart: (CalendarEvent) -> Void
     let onEventMoveChange: (CalendarEvent, CGPoint) -> Void
-    let onEventResizeStart: (CalendarEvent, CGPoint) -> Void
+    let onEventResizeStart: (CalendarEvent) -> Void
     let onEventResizeChange: (CalendarEvent, CGPoint) -> Void
     let onEventInteractionCommit: () -> Void
     let onEventInteractionCancel: () -> Void
@@ -663,19 +674,19 @@ private struct WeeklyTimelineDayColumn: View {
                     onTap: {
                         onEventTap(layout.event)
                     },
-                    onMoveStart: { point in
-                        onEventMoveStart(layout.event, eventGlobalPoint(from: point, layout: layout))
+                    onMoveStart: {
+                        onEventMoveStart(layout.event)
                     },
-                    onMoveChange: { point in
-                        onEventMoveChange(layout.event, eventGlobalPoint(from: point, layout: layout))
+                    onMoveChange: { translation in
+                        onEventMoveChange(layout.event, translation)
                     },
                     onMoveCommit: onEventInteractionCommit,
                     onMoveCancel: onEventInteractionCancel,
-                    onResizeStart: { point in
-                        onEventResizeStart(layout.event, eventGlobalPoint(from: point, layout: layout, localYInset: layout.height - WeeklyTimelineEventBlock.resizeHandleHeight))
+                    onResizeStart: {
+                        onEventResizeStart(layout.event)
                     },
-                    onResizeChange: { point in
-                        onEventResizeChange(layout.event, eventGlobalPoint(from: point, layout: layout, localYInset: layout.height - WeeklyTimelineEventBlock.resizeHandleHeight))
+                    onResizeChange: { translation in
+                        onEventResizeChange(layout.event, translation)
                     },
                     onResizeCommit: onEventInteractionCommit,
                     onResizeCancel: onEventInteractionCancel
@@ -747,13 +758,6 @@ private struct WeeklyTimelineDayColumn: View {
             y: localPoint.y
         )
     }
-
-    private func eventGlobalPoint(from localPoint: CGPoint, layout: WeeklyTimelineEventLayout, localYInset: CGFloat = 0) -> CGPoint {
-        CGPoint(
-            x: CGFloat(sectionIndex) * width + layout.x + localPoint.x,
-            y: layout.y + localYInset + localPoint.y
-        )
-    }
 }
 
 private struct WeeklyTimelineEventBlock: View {
@@ -764,11 +768,11 @@ private struct WeeklyTimelineEventBlock: View {
     let isActive: Bool
     let longPressDuration: TimeInterval
     let onTap: () -> Void
-    let onMoveStart: (CGPoint) -> Void
+    let onMoveStart: () -> Void
     let onMoveChange: (CGPoint) -> Void
     let onMoveCommit: () -> Void
     let onMoveCancel: () -> Void
-    let onResizeStart: (CGPoint) -> Void
+    let onResizeStart: () -> Void
     let onResizeChange: (CGPoint) -> Void
     let onResizeCommit: () -> Void
     let onResizeCancel: () -> Void
@@ -803,7 +807,7 @@ private struct WeeklyTimelineEventBlock: View {
                 onTap: onTap,
                 onMoveBegan: onMoveStart,
                 onMoveChanged: onMoveChange,
-                onMoveEnded: { _ in onMoveCommit() },
+                onMoveEnded: onMoveCommit,
                 onMoveCancelled: onMoveCancel
             )
         }
@@ -821,7 +825,7 @@ private struct WeeklyTimelineEventBlock: View {
                 PanCaptureView(
                     onBegan: onResizeStart,
                     onChanged: onResizeChange,
-                    onEnded: { _ in onResizeCommit() },
+                    onEnded: onResizeCommit,
                     onCancelled: onResizeCancel
                 )
                 .frame(maxWidth: .infinity, minHeight: Self.resizeHandleHeight, maxHeight: Self.resizeHandleHeight)
@@ -858,6 +862,9 @@ private struct WeeklyTimelineEventLayout: Identifiable {
     ) -> [WeeklyTimelineEventLayout] {
         let sorted = events.sorted { lhs, rhs in
             if lhs.startAt == rhs.startAt {
+                if lhs.durationMinutes == rhs.durationMinutes {
+                    return lhs.id < rhs.id
+                }
                 return lhs.durationMinutes < rhs.durationMinutes
             }
             return lhs.startAt < rhs.startAt
@@ -1080,9 +1087,9 @@ private struct LongPressCaptureView: UIViewRepresentable {
 private struct EventTouchCaptureView: UIViewRepresentable {
     let minimumDuration: TimeInterval
     let onTap: () -> Void
-    let onMoveBegan: (CGPoint) -> Void
+    let onMoveBegan: () -> Void
     let onMoveChanged: (CGPoint) -> Void
-    let onMoveEnded: (CGPoint) -> Void
+    let onMoveEnded: () -> Void
     let onMoveCancelled: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -1129,16 +1136,17 @@ private struct EventTouchCaptureView: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         private let onTap: () -> Void
-        private let onMoveBegan: (CGPoint) -> Void
+        private let onMoveBegan: () -> Void
         private let onMoveChanged: (CGPoint) -> Void
-        private let onMoveEnded: (CGPoint) -> Void
+        private let onMoveEnded: () -> Void
         private let onMoveCancelled: () -> Void
+        private var initialWindowPoint: CGPoint?
 
         init(
             onTap: @escaping () -> Void,
-            onMoveBegan: @escaping (CGPoint) -> Void,
+            onMoveBegan: @escaping () -> Void,
             onMoveChanged: @escaping (CGPoint) -> Void,
-            onMoveEnded: @escaping (CGPoint) -> Void,
+            onMoveEnded: @escaping () -> Void,
             onMoveCancelled: @escaping () -> Void
         ) {
             self.onTap = onTap
@@ -1154,17 +1162,24 @@ private struct EventTouchCaptureView: UIViewRepresentable {
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            let point = recognizer.location(in: recognizer.view)
+            let point = recognizer.location(in: nil)
 
             switch recognizer.state {
             case .began:
-                onMoveBegan(point)
+                initialWindowPoint = point
+                onMoveBegan()
             case .changed:
-                onMoveChanged(point)
+                let translation = CGPoint(
+                    x: point.x - (initialWindowPoint?.x ?? point.x),
+                    y: point.y - (initialWindowPoint?.y ?? point.y)
+                )
+                onMoveChanged(translation)
             case .ended:
-                onMoveEnded(point)
+                onMoveEnded()
+                initialWindowPoint = nil
             case .cancelled, .failed:
                 onMoveCancelled()
+                initialWindowPoint = nil
             default:
                 break
             }
@@ -1173,9 +1188,9 @@ private struct EventTouchCaptureView: UIViewRepresentable {
 }
 
 private struct PanCaptureView: UIViewRepresentable {
-    let onBegan: (CGPoint) -> Void
+    let onBegan: () -> Void
     let onChanged: (CGPoint) -> Void
-    let onEnded: (CGPoint) -> Void
+    let onEnded: () -> Void
     let onCancelled: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -1204,15 +1219,16 @@ private struct PanCaptureView: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 
     final class Coordinator: NSObject {
-        private let onBegan: (CGPoint) -> Void
+        private let onBegan: () -> Void
         private let onChanged: (CGPoint) -> Void
-        private let onEnded: (CGPoint) -> Void
+        private let onEnded: () -> Void
         private let onCancelled: () -> Void
+        private var initialWindowPoint: CGPoint?
 
         init(
-            onBegan: @escaping (CGPoint) -> Void,
+            onBegan: @escaping () -> Void,
             onChanged: @escaping (CGPoint) -> Void,
-            onEnded: @escaping (CGPoint) -> Void,
+            onEnded: @escaping () -> Void,
             onCancelled: @escaping () -> Void
         ) {
             self.onBegan = onBegan
@@ -1222,17 +1238,24 @@ private struct PanCaptureView: UIViewRepresentable {
         }
 
         @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
-            let point = recognizer.location(in: recognizer.view)
+            let point = recognizer.location(in: nil)
 
             switch recognizer.state {
             case .began:
-                onBegan(point)
+                initialWindowPoint = point
+                onBegan()
             case .changed:
-                onChanged(point)
+                let translation = CGPoint(
+                    x: point.x - (initialWindowPoint?.x ?? point.x),
+                    y: point.y - (initialWindowPoint?.y ?? point.y)
+                )
+                onChanged(translation)
             case .ended:
-                onEnded(point)
+                onEnded()
+                initialWindowPoint = nil
             case .cancelled, .failed:
                 onCancelled()
+                initialWindowPoint = nil
             default:
                 break
             }
@@ -1328,8 +1351,8 @@ private struct WeeklyEventInteraction {
 }
 
 private enum WeeklyEventInteractionMode {
-    case move(anchorMinutes: Int)
-    case resize
+    case move(originalDayIndex: Int, originalStartMinute: Int)
+    case resize(originalDurationMinutes: Int)
 }
 
 private final class WeeklyScrollViewBridge {

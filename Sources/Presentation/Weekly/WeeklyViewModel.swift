@@ -123,6 +123,7 @@ final class WeeklyViewModel: ObservableObject {
         }
 
         errorMessage = nil
+        applyOptimisticUpdate(updated, replacing: original.id)
 
         Task {
             do {
@@ -133,6 +134,7 @@ final class WeeklyViewModel: ObservableObject {
                 await reloadWeek()
             } catch {
                 errorMessage = error.localizedDescription
+                await reloadWeek()
             }
         }
     }
@@ -181,6 +183,32 @@ final class WeeklyViewModel: ObservableObject {
         weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
         Task {
             await reloadWeek()
+        }
+    }
+
+    private func applyOptimisticUpdate(_ updatedEvent: CalendarEvent, replacing eventID: Int64) {
+        sections = sections.map { section in
+            var events = section.events.filter { $0.id != eventID }
+            if calendar.isDate(updatedEvent.startAt, inSameDayAs: section.date) {
+                events.append(updatedEvent)
+            }
+
+            events.sort { lhs, rhs in
+                if lhs.startAt == rhs.startAt {
+                    if lhs.durationMinutes == rhs.durationMinutes {
+                        return lhs.id < rhs.id
+                    }
+                    return lhs.durationMinutes < rhs.durationMinutes
+                }
+                return lhs.startAt < rhs.startAt
+            }
+
+            return WeekDaySection(
+                id: section.id,
+                date: section.date,
+                isToday: section.isToday,
+                events: events
+            )
         }
     }
 
