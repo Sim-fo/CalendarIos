@@ -15,9 +15,14 @@ final class WeeklyViewModel: ObservableObject {
     private let eventRepository: any EventRepository
     private let eventTypeRepository: any EventTypeRepository
     private let calendar: Calendar
+    private let initialPastDays = 21
+    private let initialFutureDays = 42
+    private let preloadPaddingDays = 21
     private var hasLoaded = false
     private var eventBeingEditedID: Int64?
     private var latestInlineMutationID = 0
+    private var loadedStartDate: Date
+    private var loadedEndDateExclusive: Date
 
     init(
         eventRepository: any EventRepository,
@@ -28,9 +33,15 @@ final class WeeklyViewModel: ObservableObject {
         self.eventRepository = eventRepository
         self.eventTypeRepository = eventTypeRepository
         self.calendar = calendar
-        self.weekStart = calendar.startOfWeek(containing: referenceDate)
-        self.editorDraft = EventDraft.empty(on: referenceDate, calendar: calendar)
-        self.weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
+
+        let normalizedReferenceDate = calendar.startOfDay(for: referenceDate)
+        let initialWeekStart = calendar.startOfWeek(containing: normalizedReferenceDate)
+
+        self.weekStart = initialWeekStart
+        self.editorDraft = EventDraft.empty(on: normalizedReferenceDate, calendar: calendar)
+        self.weekTitle = CalendarDateFormatter.weekTitle(for: initialWeekStart, calendar: calendar)
+        self.loadedStartDate = calendar.date(byAdding: .day, value: -initialPastDays, to: initialWeekStart) ?? initialWeekStart
+        self.loadedEndDateExclusive = calendar.date(byAdding: .day, value: initialFutureDays + 1, to: initialWeekStart) ?? initialWeekStart
     }
 
     func onAppear() {
@@ -54,8 +65,13 @@ final class WeeklyViewModel: ObservableObject {
         weekStart = calendar.startOfWeek(containing: Date())
         weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
         Task {
-            await reloadWeek()
+            let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
+            await ensureLoaded(covering: weekStart, endDate: weekEnd)
         }
+    }
+
+    var initialScrollDate: Date {
+        weekStart
     }
 
     func openNewEvent(on date: Date) {
@@ -93,7 +109,7 @@ final class WeeklyViewModel: ObservableObject {
                 editorDraft.id = eventBeingEditedID
                 _ = try await eventRepository.upsert(editorDraft)
                 cancelEditor()
-                await reloadWeek()
+                await reloadLoadedRange()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -110,7 +126,7 @@ final class WeeklyViewModel: ObservableObject {
             do {
                 try await eventRepository.delete(id: eventID)
                 cancelEditor()
-                await reloadWeek()
+                await reloadLoadedRange()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -135,13 +151,28 @@ final class WeeklyViewModel: ObservableObject {
                 draft.durationMinutes = updated.durationMinutes
                 _ = try await eventRepository.upsert(draft)
                 guard mutationID == latestInlineMutationID else { return }
-                await reloadWeek()
+                await reloadLoadedRange()
             } catch {
                 guard mutationID == latestInlineMutationID else { return }
                 errorMessage = error.localizedDescription
-                await reloadWeek()
+                await reloadLoadedRange()
             }
         }
+    }
+
+    func ensureLoaded(covering startDate: Date, endDate: Date) async {
+        let normalizedStart = calendar.startOfDay(for: startDate)
+        let normalizedEnd = calendar.startOfDay(for: endDate)
+        let paddedStart = calendar.date(byAdding: .day, value: -preloadPaddingDays, to: normalizedStart) ?? normalizedStart
+        let paddedEndExclusive = calendar.date(byAdding: .day, value: preloadPaddingDays + 1, to: normalizedEnd) ?? normalizedEnd
+
+        guard paddedStart < loadedStartDate || paddedEndExclusive > loadedEndDateExclusive else {
+            return
+        }
+
+        loadedStartDate = min(loadedStartDate, paddedStart)
+        loadedEndDateExclusive = max(loadedEndDateExclusive, paddedEndExclusive)
+        await reloadLoadedRange()
     }
 
     private func loadInitialState() async {
@@ -151,7 +182,7 @@ final class WeeklyViewModel: ObservableObject {
         do {
             try await eventRepository.seedIfNeeded(referenceDate: weekStart)
             eventTypes = try await eventTypeRepository.fetchEventTypes()
-            await reloadWeek()
+            await reloadLoadedRange()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -159,16 +190,16 @@ final class WeeklyViewModel: ObservableObject {
         isLoading = false
     }
 
-    private func reloadWeek() async {
+    private func reloadLoadedRange() async {
         do {
             eventTypes = try await eventTypeRepository.fetchEventTypes()
-            let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart
-            let interval = DateInterval(start: weekStart, end: weekEnd)
+            let interval = DateInterval(start: loadedStartDate, end: loadedEndDateExclusive)
             let events = try await eventRepository.events(in: interval)
             let grouped = Dictionary(grouping: events) { event in
                 calendar.startOfDay(for: event.startAt)
             }
-            sections = calendar.daysInWeek(containing: weekStart).map { date in
+
+            sections = loadedDays().map { date in
                 let day = calendar.startOfDay(for: date)
                 return WeekDaySection(
                     id: day,
@@ -177,6 +208,7 @@ final class WeeklyViewModel: ObservableObject {
                     events: grouped[day, default: []]
                 )
             }
+
             weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
         } catch {
             errorMessage = error.localizedDescription
@@ -186,9 +218,26 @@ final class WeeklyViewModel: ObservableObject {
     private func shiftWeek(by dayOffset: Int) {
         weekStart = calendar.date(byAdding: .day, value: dayOffset, to: weekStart) ?? weekStart
         weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
+
         Task {
-            await reloadWeek()
+            let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
+            await ensureLoaded(covering: weekStart, endDate: weekEnd)
         }
+    }
+
+    private func loadedDays() -> [Date] {
+        var days: [Date] = []
+        var current = loadedStartDate
+
+        while current < loadedEndDateExclusive {
+            days.append(current)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: current) else {
+                break
+            }
+            current = next
+        }
+
+        return days
     }
 
     private func applyOptimisticUpdate(_ updatedEvent: CalendarEvent, replacing eventID: Int64) {

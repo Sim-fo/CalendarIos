@@ -3,6 +3,7 @@ import UIKit
 
 struct WeeklyView: View {
     @ObservedObject var viewModel: WeeklyViewModel
+    @AppStorage("number_of_visible_days") private var rangeStepDaysPreference = 7
     private let showsNavigationChrome: Bool
     private let onWeekTitleTap: ((Date) -> Void)?
     private let onDayHeaderTap: ((Date) -> Void)?
@@ -12,9 +13,12 @@ struct WeeklyView: View {
     @State private var activeEventInteraction: WeeklyEventInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
     @State private var verticalViewportHeight: CGFloat = 0
+    @State private var horizontalScrollOffset: CGFloat = 0
+    @State private var horizontalViewportWidth: CGFloat = 0
     @State private var hourHeight: CGFloat = 72
     @State private var dayColumnWidth: CGFloat = 178
     @State private var pinchInteraction: WeeklyPinchInteraction?
+    @State private var didRestoreInitialHorizontalPosition = false
     private let verticalScrollBridge = ScrollViewBridge()
     private let horizontalScrollBridge = ScrollViewBridge()
 
@@ -135,59 +139,68 @@ struct WeeklyView: View {
                 try? await Task.sleep(for: .milliseconds(16))
             }
         }
+        .onChange(of: viewModel.sections.first?.date) { oldDate, newDate in
+            guard let newDate else { return }
+
+            if !didRestoreInitialHorizontalPosition {
+                restoreInitialHorizontalPositionIfNeeded()
+                return
+            }
+
+            if let oldDate, newDate < oldDate, let scrollView = horizontalScrollBridge.scrollView {
+                let prependedDays = dayDistance(from: newDate, to: oldDate)
+                guard prependedDays > 0 else { return }
+                let adjustedOffset = scrollView.contentOffset.x + CGFloat(prependedDays) * dayColumnWidth
+                scrollView.setContentOffset(
+                    CGPoint(x: adjustedOffset, y: scrollView.contentOffset.y),
+                    animated: false
+                )
+                horizontalScrollOffset = adjustedOffset
+            }
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             ZStack {
-                HStack(spacing: 12) {
-                    Button {
-                        if let date = viewModel.sections.first?.date {
-                            onWeekTitleTap?(date)
-                        }
-                    } label: {
-                        Text(primaryMonthLabel)
-                            .font(.title3.weight(.regular))
-                            .foregroundStyle(.primary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(onWeekTitleTap == nil)
+                HStack {
+                    monthHeaderButton(
+                        text: primaryMonthLabel,
+                        date: visibleFirstDate,
+                        alignment: .leading
+                    )
 
                     Spacer(minLength: 0)
 
                     if let secondaryMonthLabel {
-                        Button {
-                            if let date = viewModel.sections.last?.date {
-                                onWeekTitleTap?(date)
-                            }
-                        } label: {
-                            Text(secondaryMonthLabel)
-                                .font(.title3.weight(.regular))
-                                .foregroundStyle(.primary)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(onWeekTitleTap == nil)
+                        monthHeaderButton(
+                            text: secondaryMonthLabel,
+                            date: visibleLastDate,
+                            alignment: .trailing
+                        )
                     }
                 }
 
-                HStack(spacing: 10) {
+                HStack(spacing: 2) {
                     Button {
-                        viewModel.showPreviousWeek()
+                        scrollHorizontally(by: -rangeStepDays)
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.headline.weight(.semibold))
-                            .frame(width: 32, height: 32)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
 
                     Button {
-                        viewModel.showNextWeek()
+                        scrollHorizontally(by: rangeStepDays)
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.headline.weight(.semibold))
-                            .frame(width: 32, height: 32)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -196,22 +209,50 @@ struct WeeklyView: View {
     }
 
     private var primaryMonthLabel: String {
-        monthYearText(for: viewModel.sections.first?.date ?? viewModel.weekStart)
+        monthYearText(for: visibleSections.first?.date ?? viewModel.initialScrollDate)
     }
 
     private var secondaryMonthLabel: String? {
-        guard let firstDate = viewModel.sections.first?.date,
-              let lastDate = viewModel.sections.last?.date else {
+        guard let firstDate = visibleSections.first?.date else {
             return nil
         }
 
         let firstComponents = calendar.dateComponents([.year, .month], from: firstDate)
-        let lastComponents = calendar.dateComponents([.year, .month], from: lastDate)
-        guard firstComponents.year != lastComponents.year || firstComponents.month != lastComponents.month else {
-            return nil
+        for section in visibleSections.dropFirst() {
+            let sectionComponents = calendar.dateComponents([.year, .month], from: section.date)
+            if firstComponents.year != sectionComponents.year || firstComponents.month != sectionComponents.month {
+                return monthYearText(for: section.date)
+            }
         }
+        return nil
+    }
 
-        return monthYearText(for: lastDate)
+    private var rangeStepDays: Int {
+        rangeStepDaysPreference.clamped(to: 1...10)
+    }
+
+    private var visibleFirstDate: Date? {
+        visibleSections.first?.date
+    }
+
+    private var visibleLastDate: Date? {
+        visibleSections.last?.date
+    }
+
+    private var visibleSections: ArraySlice<WeekDaySection> {
+        guard !viewModel.sections.isEmpty else { return [] }
+
+        let fallbackViewportWidth = UIScreen.main.bounds.width
+        let effectiveViewportWidth = horizontalViewportWidth > 0 ? horizontalViewportWidth : fallbackViewportWidth
+        let visibleWidth = max(effectiveViewportWidth - timeColumnWidth, dayColumnWidth)
+        let startIndex = max(Int(floor(horizontalScrollOffset / max(dayColumnWidth, 1))), 0)
+        let endIndex = max(
+            Int(ceil((horizontalScrollOffset + visibleWidth) / max(dayColumnWidth, 1))) - 1,
+            startIndex
+        )
+        let clampedStart = min(startIndex, max(viewModel.sections.count - 1, 0))
+        let clampedEnd = min(endIndex, max(viewModel.sections.count - 1, 0))
+        return viewModel.sections[clampedStart...clampedEnd]
     }
 
     private func monthYearText(for date: Date) -> String {
@@ -220,6 +261,72 @@ struct WeeklyView: View {
         formatter.locale = calendar.locale ?? .current
         formatter.dateFormat = "LLLL yyyy"
         return formatter.string(from: date).capitalized
+    }
+
+    @ViewBuilder
+    private func monthHeaderButton(text: String, date: Date?, alignment: Alignment) -> some View {
+        Button {
+            if let date {
+                onWeekTitleTap?(date)
+            }
+        } label: {
+            Text(text)
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(onWeekTitleTap == nil || date == nil)
+    }
+
+    private func restoreInitialHorizontalPositionIfNeeded() {
+        guard !didRestoreInitialHorizontalPosition,
+              let scrollView = horizontalScrollBridge.scrollView,
+              let firstDate = viewModel.sections.first?.date else {
+            return
+        }
+
+        let daysFromStart = dayDistance(from: firstDate, to: viewModel.initialScrollDate)
+        let targetOffset = max(CGFloat(daysFromStart) * dayColumnWidth, 0)
+        scrollView.setContentOffset(CGPoint(x: targetOffset, y: scrollView.contentOffset.y), animated: false)
+        horizontalScrollOffset = targetOffset
+        didRestoreInitialHorizontalPosition = true
+        prefetchAroundVisibleRangeIfNeeded()
+    }
+
+    private func scrollHorizontally(by dayDelta: Int) {
+        guard let scrollView = horizontalScrollBridge.scrollView else { return }
+
+        let targetOffset = max(horizontalScrollOffset + CGFloat(dayDelta) * dayColumnWidth, 0)
+        let maxOffset = max(scrollView.contentSize.width - scrollView.bounds.width, 0)
+        let clampedOffset = min(targetOffset, maxOffset)
+        scrollView.setContentOffset(CGPoint(x: clampedOffset, y: scrollView.contentOffset.y), animated: true)
+        horizontalScrollOffset = clampedOffset
+
+        if let startDate = visibleFirstDate {
+            let targetStart = calendar.date(byAdding: .day, value: dayDelta, to: startDate) ?? startDate
+            let targetEnd = calendar.date(byAdding: .day, value: max(dayDelta, 0), to: visibleLastDate ?? targetStart) ?? targetStart
+            Task {
+                await viewModel.ensureLoaded(covering: min(targetStart, targetEnd), endDate: max(targetStart, targetEnd))
+            }
+        }
+    }
+
+    private func prefetchAroundVisibleRangeIfNeeded() {
+        guard let startDate = visibleFirstDate, let endDate = visibleLastDate else { return }
+
+        Task {
+            await viewModel.ensureLoaded(covering: startDate, endDate: endDate)
+        }
+    }
+
+    private func dayDistance(from startDate: Date, to endDate: Date) -> Int {
+        calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: startDate),
+            to: calendar.startOfDay(for: endDate)
+        ).day ?? 0
     }
 
     private var weeklyTimeline: some View {
@@ -235,9 +342,9 @@ struct WeeklyView: View {
                                 section: section,
                                 calendar: calendar,
                                 width: dayColumnWidth,
-                                onHeaderTap: { onDayHeaderTap?(section.date) },
-                                onAddTap: { viewModel.openNewEvent(on: section.date) }
+                                onHeaderTap: { onDayHeaderTap?(section.date) }
                             )
+                            .id(section.id)
                         }
                     }
 
@@ -318,7 +425,24 @@ struct WeeklyView: View {
             }
             .background(
                 ScrollViewResolverView(axis: .horizontal) { scrollView in
-                    horizontalScrollBridge.scrollView = scrollView
+                    horizontalScrollBridge.bind(to: scrollView) { offset in
+                        horizontalScrollOffset = offset.x
+                        horizontalViewportWidth = scrollView.bounds.width
+                        prefetchAroundVisibleRangeIfNeeded()
+                    }
+                    horizontalViewportWidth = scrollView.bounds.width
+                    restoreInitialHorizontalPositionIfNeeded()
+                }
+            )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear {
+                            horizontalViewportWidth = proxy.size.width
+                        }
+                        .onChange(of: proxy.size.width) { _, newWidth in
+                            horizontalViewportWidth = newWidth
+                        }
                 }
             )
 
@@ -673,41 +797,54 @@ private struct WeeklyDayHeader: View {
     let calendar: Calendar
     let width: CGFloat
     let onHeaderTap: () -> Void
-    let onAddTap: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Button(action: onHeaderTap) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(CalendarDateFormatter.weekdayHeader(for: section.date, calendar: calendar))
-                        .font(.headline)
+        Button(action: onHeaderTap) {
+            VStack(spacing: 2) {
+                Text(shortWeekday)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
 
-                    Text(section.isToday ? "Today" : "\(section.events.count) events")
-                        .font(.caption.weight(section.isToday ? .semibold : .regular))
-                        .foregroundStyle(section.isToday ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                Text(dayNumber)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(section.isToday ? .primary : .primary)
             }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            Button(action: onAddTap) {
-                Image(systemName: "plus.circle.fill")
-                    .font(.title3)
-            }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .frame(width: width, height: 52, alignment: .topLeading)
-        .background(section.isToday ? Color.accentColor.opacity(0.08) : Color.clear)
+        .buttonStyle(.plain)
+        .frame(width: width, height: 52)
+        .background(
+            section.isToday
+                ? Color.accentColor.opacity(0.16)
+                : Color(uiColor: .secondarySystemBackground)
+        )
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+        }
         .overlay(alignment: .trailing) {
             Rectangle()
                 .fill(Color.primary.opacity(0.08))
                 .frame(width: 1)
         }
+    }
+
+    private var shortWeekday: String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.setLocalizedDateFormatFromTemplate("EEE")
+        return formatter.string(from: section.date).capitalized
+    }
+
+    private var dayNumber: String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.setLocalizedDateFormatFromTemplate("d")
+        return formatter.string(from: section.date)
     }
 }
 
@@ -1534,6 +1671,12 @@ private extension Int {
     }
 }
 
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 private enum WeeklyAutoScrollDirection: Hashable {
     case up
     case down
@@ -1568,6 +1711,40 @@ private enum WeeklyEventInteractionMode {
 
 private final class ScrollViewBridge {
     weak var scrollView: UIScrollView?
+    private var displayLink: CADisplayLink?
+    private var lastOffset: CGPoint = .zero
+    private var onOffsetChange: ((CGPoint) -> Void)?
+
+    func bind(to scrollView: UIScrollView, onOffsetChange: @escaping (CGPoint) -> Void) {
+        self.onOffsetChange = onOffsetChange
+
+        if self.scrollView !== scrollView {
+            self.scrollView = scrollView
+            lastOffset = scrollView.contentOffset
+            startPollingIfNeeded()
+        }
+
+        onOffsetChange(scrollView.contentOffset)
+    }
+
+    deinit {
+        displayLink?.invalidate()
+    }
+
+    @objc private func pollContentOffset() {
+        guard let scrollView else { return }
+        let offset = scrollView.contentOffset
+        guard offset != lastOffset else { return }
+        lastOffset = offset
+        onOffsetChange?(offset)
+    }
+
+    private func startPollingIfNeeded() {
+        guard displayLink == nil else { return }
+        let displayLink = CADisplayLink(target: self, selector: #selector(pollContentOffset))
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
+    }
 }
 
 private struct ScrollViewResolverView: UIViewRepresentable {
