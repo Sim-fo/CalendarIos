@@ -2,42 +2,157 @@ import SwiftUI
 
 struct AppShellView: View {
     let dependencies: CalendarDependencies
+    @State private var selectedCalendarMode: CalendarMode = .week
+    @State private var selectedCalendarDate: Date = Date()
 
     var body: some View {
-        TabView {
-            WeeklyView(
-                viewModel: WeeklyViewModel(
-                    eventRepository: dependencies.eventRepository,
-                    eventTypeRepository: dependencies.eventRepository
-                )
-            )
-            .tabItem {
-                Label("Неделя", systemImage: "calendar")
-            }
+        CalendarHomeView(
+            dependencies: dependencies,
+            selectedMode: $selectedCalendarMode,
+            selectedDate: $selectedCalendarDate
+        )
+    }
+}
 
-            PlaceholderFeatureView(
-                title: "Дневной вид",
-                subtitle: "Здесь будет дневной экран календаря с таймлайном на один день.",
-                systemImage: "calendar.day.timeline.leading"
-            )
-            .tabItem {
-                Label("День", systemImage: "calendar.day.timeline.leading")
-            }
+private struct CalendarHomeView: View {
+    let dependencies: CalendarDependencies
+    @Binding var selectedMode: CalendarMode
+    @Binding var selectedDate: Date
+    @State private var isPresentingSections = false
+    private let calendar = Calendar.current
 
-            PlaceholderFeatureView(
-                title: "Месячный вид",
-                subtitle: "Здесь будет месячный календарь с маркерами событий, дней рождений и трекеров.",
-                systemImage: "calendar.badge.clock"
-            )
-            .tabItem {
-                Label("Месяц", systemImage: "calendar.badge.clock")
-            }
-
-            MoreMenuView()
-                .tabItem {
-                    Label("Ещё", systemImage: "square.grid.2x2")
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                if selectedMode != .week {
+                    modeReturnBar
                 }
+
+                Group {
+                    switch selectedMode {
+                    case .day:
+                        PlaceholderFeatureView(
+                            title: dayTitle,
+                            subtitle: "Здесь будет дневной экран календаря с таймлайном на один день. Выбранная дата: \(longDateText(for: selectedDate)).",
+                            systemImage: "calendar.day.timeline.leading",
+                            showsNavigationChrome: false
+                        )
+                    case .week:
+                        WeeklyView(
+                            viewModel: WeeklyViewModel(
+                                eventRepository: dependencies.eventRepository,
+                                eventTypeRepository: dependencies.eventRepository
+                            ),
+                            showsNavigationChrome: false,
+                            onWeekTitleTap: { weekStart in
+                                selectedDate = weekStart
+                                selectedMode = .month
+                            },
+                            onDayHeaderTap: { date in
+                                selectedDate = date
+                                selectedMode = .day
+                            }
+                        )
+                    case .month:
+                        PlaceholderFeatureView(
+                            title: monthTitle,
+                            subtitle: "Здесь будет месячный календарь с маркерами событий, дней рождений и трекеров. Переход выполнен к периоду, содержащему \(longDateText(for: selectedDate)).",
+                            systemImage: "calendar.badge.clock",
+                            showsNavigationChrome: false
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .padding(.top, 8)
+            .navigationTitle(navigationTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isPresentingSections = true
+                    } label: {
+                        Image(systemName: "line.3.horizontal")
+                    }
+                }
+            }
+            .sheet(isPresented: $isPresentingSections) {
+                MoreMenuView()
+            }
         }
+    }
+
+    private var navigationTitle: String {
+        switch selectedMode {
+        case .day:
+            return "День"
+        case .week:
+            return "Календарь"
+        case .month:
+            return "Месяц"
+        }
+    }
+
+    private var modeReturnBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                selectedMode = .week
+            } label: {
+                Label("К неделе", systemImage: "chevron.left")
+            }
+            .buttonStyle(.bordered)
+
+            Spacer()
+
+            Text(contextLabel)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var contextLabel: String {
+        switch selectedMode {
+        case .day:
+            return shortDateText(for: selectedDate)
+        case .week:
+            return ""
+        case .month:
+            return monthText(for: selectedDate)
+        }
+    }
+
+    private var dayTitle: String {
+        "День: \(shortDateText(for: selectedDate))"
+    }
+
+    private var monthTitle: String {
+        "Месяц: \(monthText(for: selectedDate))"
+    }
+
+    private func shortDateText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = "d MMM"
+        return formatter.string(from: date)
+    }
+
+    private func monthText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = "LLLL yyyy"
+        return formatter.string(from: date).capitalized
+    }
+
+    private func longDateText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateStyle = .long
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 }
 
@@ -117,3 +232,10 @@ private struct PlaceholderMenuItem: Identifiable {
     let systemImage: String
 }
 
+private enum CalendarMode: String, Identifiable {
+    case day
+    case week
+    case month
+
+    var id: String { rawValue }
+}

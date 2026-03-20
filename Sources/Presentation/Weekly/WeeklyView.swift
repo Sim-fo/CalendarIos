@@ -3,6 +3,9 @@ import UIKit
 
 struct WeeklyView: View {
     @ObservedObject var viewModel: WeeklyViewModel
+    private let showsNavigationChrome: Bool
+    private let onWeekTitleTap: ((Date) -> Void)?
+    private let onDayHeaderTap: ((Date) -> Void)?
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
     @State private var guideInteraction: WeeklyGuideInteraction?
@@ -30,116 +33,193 @@ struct WeeklyView: View {
     private let horizontalPinchSensitivity: CGFloat = 0.8
     private let verticalPinchSensitivity: CGFloat = 0.9
 
-    init(viewModel: WeeklyViewModel, calendar: Calendar = .current) {
+    init(
+        viewModel: WeeklyViewModel,
+        calendar: Calendar = .current,
+        showsNavigationChrome: Bool = true,
+        onWeekTitleTap: ((Date) -> Void)? = nil,
+        onDayHeaderTap: ((Date) -> Void)? = nil
+    ) {
         self.viewModel = viewModel
         self.calendar = calendar
+        self.showsNavigationChrome = showsNavigationChrome
+        self.onWeekTitleTap = onWeekTitleTap
+        self.onDayHeaderTap = onDayHeaderTap
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                CalendarColor.groupedBackground
-                    .ignoresSafeArea()
+        Group {
+            if showsNavigationChrome {
+                NavigationStack {
+                    weeklyContent
+                }
+            } else {
+                weeklyContent
+            }
+        }
+    }
 
-                VStack(spacing: 16) {
-                    header
+    @ViewBuilder
+    private var weeklyContent: some View {
+        ZStack {
+            CalendarColor.groupedBackground
+                .ignoresSafeArea()
 
-                    if viewModel.isLoading && viewModel.sections.isEmpty {
-                        ProgressView("Loading week...")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        weeklyTimeline
+            VStack(spacing: 16) {
+                header
+
+                if viewModel.isLoading && viewModel.sections.isEmpty {
+                    ProgressView("Loading week...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    weeklyTimeline
+                }
+            }
+            .padding(.vertical, 12)
+
+            if let guideState {
+                VStack {
+                    SelectionTimeHeaderView(
+                        selectedDate: guideState.date,
+                        calendar: calendar
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
+
+                    Spacer()
+                }
+                .transition(.opacity)
+                .zIndex(10)
+            }
+        }
+        .if(showsNavigationChrome) { view in
+            view
+                .navigationTitle("Weekly")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            viewModel.openNewEvent(at: Date())
+                        } label: {
+                            Image(systemName: "plus")
+                        }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+        }
+        .sheet(isPresented: $viewModel.isPresentingEditor) {
+            EventEditorView(
+                draft: $viewModel.editorDraft,
+                eventTypes: viewModel.eventTypes,
+                isSaving: viewModel.isSaving,
+                onSave: viewModel.saveEditor,
+                onDelete: deleteAction,
+                onCancel: { viewModel.cancelEditor() }
+            )
+        }
+        .alert("Something went wrong", isPresented: errorBinding) {
+            Button("OK") {
+                viewModel.dismissError()
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "Unknown error")
+        }
+        .task {
+            viewModel.onAppear()
+        }
+        .task(id: autoScrollDirection) {
+            guard let direction = autoScrollDirection else { return }
 
-                if let guideState {
-                    VStack {
-                        SelectionTimeHeaderView(
-                            selectedDate: guideState.date,
-                            calendar: calendar
-                        )
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .allowsHitTesting(false)
-
-                        Spacer()
-                    }
-                    .transition(.opacity)
-                    .zIndex(10)
-                }
-
-            }
-            .navigationTitle("Weekly")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        viewModel.openNewEvent(at: Date())
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                }
-            }
-            .sheet(isPresented: $viewModel.isPresentingEditor) {
-                EventEditorView(
-                    draft: $viewModel.editorDraft,
-                    eventTypes: viewModel.eventTypes,
-                    isSaving: viewModel.isSaving,
-                    onSave: viewModel.saveEditor,
-                    onDelete: deleteAction,
-                    onCancel: { viewModel.cancelEditor() }
-                )
-            }
-            .alert("Something went wrong", isPresented: errorBinding) {
-                Button("OK") {
-                    viewModel.dismissError()
-                }
-            } message: {
-                Text(viewModel.errorMessage ?? "Unknown error")
-            }
-            .task {
-                viewModel.onAppear()
-            }
-            .task(id: autoScrollDirection) {
-                guard let direction = autoScrollDirection else { return }
-
-                while !Task.isCancelled && autoScrollDirection == direction && guideInteraction != nil {
-                    scrollTimeline(in: direction, step: autoScrollStep)
-                    try? await Task.sleep(for: .milliseconds(16))
-                }
+            while !Task.isCancelled && autoScrollDirection == direction && guideInteraction != nil {
+                scrollTimeline(in: direction, step: autoScrollStep)
+                try? await Task.sleep(for: .milliseconds(16))
             }
         }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.weekTitle)
-                .font(.title2.weight(.semibold))
+            ZStack {
+                HStack(spacing: 12) {
+                    Button {
+                        if let date = viewModel.sections.first?.date {
+                            onWeekTitleTap?(date)
+                        }
+                    } label: {
+                        Text(primaryMonthLabel)
+                            .font(.title3.weight(.regular))
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(onWeekTitleTap == nil)
 
-            HStack(spacing: 10) {
-                Button {
-                    viewModel.showPreviousWeek()
-                } label: {
-                    Label("Previous", systemImage: "chevron.left")
-                }
-                .buttonStyle(.bordered)
+                    Spacer(minLength: 0)
 
-                Button("Today") {
-                    viewModel.showCurrentWeek()
+                    if let secondaryMonthLabel {
+                        Button {
+                            if let date = viewModel.sections.last?.date {
+                                onWeekTitleTap?(date)
+                            }
+                        } label: {
+                            Text(secondaryMonthLabel)
+                                .font(.title3.weight(.regular))
+                                .foregroundStyle(.primary)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(onWeekTitleTap == nil)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
 
-                Button {
-                    viewModel.showNextWeek()
-                } label: {
-                    Label("Next", systemImage: "chevron.right")
+                HStack(spacing: 10) {
+                    Button {
+                        viewModel.showPreviousWeek()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.headline.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.showNextWeek()
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.headline.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+    }
+
+    private var primaryMonthLabel: String {
+        monthYearText(for: viewModel.sections.first?.date ?? viewModel.weekStart)
+    }
+
+    private var secondaryMonthLabel: String? {
+        guard let firstDate = viewModel.sections.first?.date,
+              let lastDate = viewModel.sections.last?.date else {
+            return nil
+        }
+
+        let firstComponents = calendar.dateComponents([.year, .month], from: firstDate)
+        let lastComponents = calendar.dateComponents([.year, .month], from: lastDate)
+        guard firstComponents.year != lastComponents.year || firstComponents.month != lastComponents.month else {
+            return nil
+        }
+
+        return monthYearText(for: lastDate)
+    }
+
+    private func monthYearText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = "LLLL yyyy"
+        return formatter.string(from: date).capitalized
     }
 
     private var weeklyTimeline: some View {
@@ -155,6 +235,7 @@ struct WeeklyView: View {
                                 section: section,
                                 calendar: calendar,
                                 width: dayColumnWidth,
+                                onHeaderTap: { onDayHeaderTap?(section.date) },
                                 onAddTap: { viewModel.openNewEvent(on: section.date) }
                             )
                         }
@@ -265,11 +346,18 @@ struct WeeklyView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(CalendarColor.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(Color(uiColor: .systemBackground))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1),
+            alignment: .top
+        )
+        .overlay(
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1),
+            alignment: .bottom
         )
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -584,18 +672,24 @@ private struct WeeklyDayHeader: View {
     let section: WeekDaySection
     let calendar: Calendar
     let width: CGFloat
+    let onHeaderTap: () -> Void
     let onAddTap: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(CalendarDateFormatter.weekdayHeader(for: section.date, calendar: calendar))
-                    .font(.headline)
+            Button(action: onHeaderTap) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(CalendarDateFormatter.weekdayHeader(for: section.date, calendar: calendar))
+                        .font(.headline)
 
-                Text(section.isToday ? "Today" : "\(section.events.count) events")
-                    .font(.caption.weight(section.isToday ? .semibold : .regular))
-                    .foregroundStyle(section.isToday ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    Text(section.isToday ? "Today" : "\(section.events.count) events")
+                        .font(.caption.weight(section.isToday ? .semibold : .regular))
+                        .foregroundStyle(section.isToday ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
             Spacer(minLength: 0)
 
@@ -1773,6 +1867,20 @@ private final class PinchGestureAttachmentView: UIView {
 private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
         Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func `if`<Content: View>(
+        _ condition: Bool,
+        transform: (Self) -> Content
+    ) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }
 
