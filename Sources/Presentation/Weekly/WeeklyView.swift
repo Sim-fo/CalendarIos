@@ -9,17 +9,26 @@ struct WeeklyView: View {
     @State private var activeEventInteraction: WeeklyEventInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
     @State private var verticalViewportHeight: CGFloat = 0
-    private let verticalScrollBridge = WeeklyScrollViewBridge()
+    @State private var hourHeight: CGFloat = 72
+    @State private var dayColumnWidth: CGFloat = 178
+    @State private var pinchInteraction: WeeklyPinchInteraction?
+    private let verticalScrollBridge = ScrollViewBridge()
+    private let horizontalScrollBridge = ScrollViewBridge()
 
-    private let hourHeight: CGFloat = 72
     private let timeColumnWidth: CGFloat = 58
-    private let dayColumnWidth: CGFloat = 178
+    private let dayHeaderHeight: CGFloat = 52
     private let selectionSlotMinutes = 30
     private let manipulationSlotMinutes = 15
     private let minimumEventDurationMinutes = 15
     private let longPressDuration = 0.25
     private let autoScrollEdgeThreshold: CGFloat = 64
     private let autoScrollStep: CGFloat = 10
+    private let minimumHourHeight: CGFloat = 44
+    private let maximumHourHeight: CGFloat = 132
+    private let minimumDayColumnWidth: CGFloat = 104
+    private let maximumDayColumnWidth: CGFloat = 320
+    private let horizontalPinchSensitivity: CGFloat = 0.8
+    private let verticalPinchSensitivity: CGFloat = 0.9
 
     init(viewModel: WeeklyViewModel, calendar: Calendar = .current) {
         self.viewModel = viewModel
@@ -226,9 +235,14 @@ struct WeeklyView: View {
                 }
                 .padding(.leading, timeColumnWidth)
             }
+            .background(
+                ScrollViewResolverView(axis: .horizontal) { scrollView in
+                    horizontalScrollBridge.scrollView = scrollView
+                }
+            )
 
             VStack(spacing: 0) {
-                TimeColumnHeaderPlaceholder(width: timeColumnWidth, height: 52)
+                TimeColumnHeaderPlaceholder(width: timeColumnWidth, height: dayHeaderHeight)
 
                 GeometryReader { proxy in
                     TimeColumnView(
@@ -242,6 +256,14 @@ struct WeeklyView: View {
                 }
                 .frame(width: timeColumnWidth)
             }
+
+            TwoAxisPinchCaptureView(
+                onBegan: beginPinch,
+                onChanged: updatePinch,
+                onEnded: endPinch,
+                onCancelled: endPinch
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(CalendarColor.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -471,6 +493,90 @@ struct WeeklyView: View {
             )
         }
         refreshGuideStateIfNeeded()
+    }
+
+    private func beginPinch(_ value: TwoAxisPinchValue) {
+        guard guideInteraction == nil, activeEventInteraction == nil else { return }
+
+        pinchInteraction = WeeklyPinchInteraction(
+            startDayColumnWidth: dayColumnWidth,
+            startHourHeight: hourHeight,
+            initialHorizontalOffset: horizontalScrollBridge.scrollView?.contentOffset.x ?? 0,
+            initialVerticalOffset: verticalScrollBridge.scrollView?.contentOffset.y ?? timelineScrollOffset,
+            anchorPoint: value.center,
+            initialSpan: value.span
+        )
+    }
+
+    private func updatePinch(_ value: TwoAxisPinchValue) {
+        guard let interaction = pinchInteraction else { return }
+
+        let horizontalScale = pinchScale(
+            current: value.span.width,
+            initial: interaction.initialSpan.width,
+            sensitivity: horizontalPinchSensitivity
+        )
+        let verticalScale = pinchScale(
+            current: value.span.height,
+            initial: interaction.initialSpan.height,
+            sensitivity: verticalPinchSensitivity
+        )
+
+        let targetDayWidth = (interaction.startDayColumnWidth * horizontalScale)
+            .clamped(to: minimumDayColumnWidth...maximumDayColumnWidth)
+        let targetHourHeight = (interaction.startHourHeight * verticalScale)
+            .clamped(to: minimumHourHeight...maximumHourHeight)
+
+        guard targetDayWidth != dayColumnWidth || targetHourHeight != hourHeight else { return }
+
+        dayColumnWidth = targetDayWidth
+        hourHeight = targetHourHeight
+
+        let appliedHorizontalScale = targetDayWidth / interaction.startDayColumnWidth
+        let appliedVerticalScale = targetHourHeight / interaction.startHourHeight
+        let visibleX = max(interaction.anchorPoint.x - timeColumnWidth, 0)
+        let visibleY = max(interaction.anchorPoint.y - dayHeaderHeight, 0)
+
+        if let horizontalScrollView = horizontalScrollBridge.scrollView {
+            let maxOffsetX = max(horizontalScrollView.contentSize.width - horizontalScrollView.bounds.width, 0)
+            let targetOffsetX = ((interaction.initialHorizontalOffset + visibleX) * appliedHorizontalScale) - visibleX
+            let clampedOffsetX = targetOffsetX.clamped(to: 0...maxOffsetX)
+            horizontalScrollView.setContentOffset(
+                CGPoint(x: clampedOffsetX, y: horizontalScrollView.contentOffset.y),
+                animated: false
+            )
+        }
+
+        if let verticalScrollView = verticalScrollBridge.scrollView {
+            let maxOffsetY = max(verticalScrollView.contentSize.height - verticalScrollView.bounds.height, 0)
+            let targetOffsetY = ((interaction.initialVerticalOffset + visibleY) * appliedVerticalScale) - visibleY
+            let clampedOffsetY = targetOffsetY.clamped(to: 0...maxOffsetY)
+            verticalScrollView.setContentOffset(
+                CGPoint(x: verticalScrollView.contentOffset.x, y: clampedOffsetY),
+                animated: false
+            )
+            timelineScrollOffset = clampedOffsetY
+
+            if let guide = guideInteraction {
+                guideInteraction = WeeklyGuideInteraction(
+                    point: CGPoint(
+                        x: guide.point.x,
+                        y: guide.point.y + (clampedOffsetY - interaction.initialVerticalOffset)
+                    ),
+                    fallbackIndex: guide.fallbackIndex
+                )
+                refreshGuideStateIfNeeded()
+            }
+        }
+    }
+
+    private func endPinch() {
+        pinchInteraction = nil
+    }
+
+    private func pinchScale(current: CGFloat, initial: CGFloat, sensitivity: CGFloat) -> CGFloat {
+        guard current > 0, initial > 0 else { return 1 }
+        return pow(current / initial, sensitivity)
     }
 }
 
@@ -1266,14 +1372,14 @@ private struct PanCaptureView: UIViewRepresentable {
 }
 
 private struct ObservableScrollView<Content: View>: View {
-    let bridge: WeeklyScrollViewBridge
+    let bridge: ScrollViewBridge
     let onScrollViewResolved: (UIScrollView) -> Void
     let content: () -> Content
     let onOffsetChange: (CGFloat) -> Void
     let onViewportHeightChange: (CGFloat) -> Void
 
     init(
-        bridge: WeeklyScrollViewBridge,
+        bridge: ScrollViewBridge,
         onScrollViewResolved: @escaping (UIScrollView) -> Void,
         @ViewBuilder content: @escaping () -> Content,
         onOffsetChange: @escaping (CGFloat) -> Void,
@@ -1312,7 +1418,7 @@ private struct ObservableScrollView<Content: View>: View {
             onOffsetChange(-minY)
         }
         .background(
-            ScrollViewResolverView { scrollView in
+            ScrollViewResolverView(axis: .vertical) { scrollView in
                 bridge.scrollView = scrollView
                 onScrollViewResolved(scrollView)
             }
@@ -1344,6 +1450,15 @@ private struct WeeklyGuideInteraction {
     let fallbackIndex: Int
 }
 
+private struct WeeklyPinchInteraction {
+    let startDayColumnWidth: CGFloat
+    let startHourHeight: CGFloat
+    let initialHorizontalOffset: CGFloat
+    let initialVerticalOffset: CGFloat
+    let anchorPoint: CGPoint
+    let initialSpan: CGSize
+}
+
 private struct WeeklyEventInteraction {
     let eventID: Int64
     let originalEvent: CalendarEvent
@@ -1357,29 +1472,38 @@ private enum WeeklyEventInteractionMode {
     case resize(originalDurationMinutes: Int)
 }
 
-private final class WeeklyScrollViewBridge {
+private final class ScrollViewBridge {
     weak var scrollView: UIScrollView?
 }
 
 private struct ScrollViewResolverView: UIViewRepresentable {
+    let axis: ScrollViewAxis
     let onResolve: (UIScrollView) -> Void
 
     func makeUIView(context: Context) -> UIView {
-        ResolverUIView(onResolve: onResolve)
+        ResolverUIView(axis: axis, onResolve: onResolve)
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
         if let resolverView = uiView as? ResolverUIView {
+            resolverView.axis = axis
             resolverView.onResolve = onResolve
             resolverView.resolveIfNeeded()
         }
     }
 }
 
+private enum ScrollViewAxis {
+    case horizontal
+    case vertical
+}
+
 private final class ResolverUIView: UIView {
+    var axis: ScrollViewAxis
     var onResolve: (UIScrollView) -> Void
 
-    init(onResolve: @escaping (UIScrollView) -> Void) {
+    init(axis: ScrollViewAxis, onResolve: @escaping (UIScrollView) -> Void) {
+        self.axis = axis
         self.onResolve = onResolve
         super.init(frame: .zero)
         backgroundColor = .clear
@@ -1407,31 +1531,38 @@ private final class ResolverUIView: UIView {
     }
 
     func resolveIfNeeded() {
-        guard let scrollView = resolvedWeeklyVerticalScrollView() else { return }
+        guard let scrollView = resolvedWeeklyScrollView(axis: axis) else { return }
         onResolve(scrollView)
     }
 }
 
 private extension UIView {
-    func resolvedWeeklyVerticalScrollView() -> UIScrollView? {
+    func resolvedWeeklyScrollView(axis: ScrollViewAxis) -> UIScrollView? {
         var root: UIView = self
         while let parent = root.superview {
             root = parent
         }
 
         let allScrollViews = root.allDescendantScrollViews()
-
-        let verticalCandidates = allScrollViews.filter { scrollView in
+        let candidates = allScrollViews.filter { scrollView in
             scrollView.layoutIfNeeded()
-            let contentHeight = scrollView.contentSize.height
-            let boundsHeight = scrollView.bounds.height
-            return contentHeight > boundsHeight + 1 || scrollView.alwaysBounceVertical
+            switch axis {
+            case .horizontal:
+                return scrollView.contentSize.width > scrollView.bounds.width + 1 || scrollView.alwaysBounceHorizontal
+            case .vertical:
+                return scrollView.contentSize.height > scrollView.bounds.height + 1 || scrollView.alwaysBounceVertical
+            }
         }
 
-        if let bestVertical = verticalCandidates.max(by: { lhs, rhs in
-            (lhs.contentSize.height - lhs.bounds.height) < (rhs.contentSize.height - rhs.bounds.height)
+        if let bestMatch = candidates.max(by: { lhs, rhs in
+            switch axis {
+            case .horizontal:
+                return (lhs.contentSize.width - lhs.bounds.width) < (rhs.contentSize.width - rhs.bounds.width)
+            case .vertical:
+                return (lhs.contentSize.height - lhs.bounds.height) < (rhs.contentSize.height - rhs.bounds.height)
+            }
         }) {
-            return bestVertical
+            return bestMatch
         }
 
         return allScrollViews.last
@@ -1451,6 +1582,197 @@ private extension UIView {
 
         collect(from: self)
         return result
+    }
+}
+
+private struct TwoAxisPinchValue {
+    let center: CGPoint
+    let span: CGSize
+}
+
+private struct TwoAxisPinchCaptureView: UIViewRepresentable {
+    let onBegan: (TwoAxisPinchValue) -> Void
+    let onChanged: (TwoAxisPinchValue) -> Void
+    let onEnded: () -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onBegan: onBegan,
+            onChanged: onChanged,
+            onEnded: onEnded,
+            onCancelled: onCancelled
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = PinchGestureAttachmentView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onBegan = onBegan
+        context.coordinator.onChanged = onChanged
+        context.coordinator.onEnded = onEnded
+        context.coordinator.onCancelled = onCancelled
+
+        if let view = uiView as? PinchGestureAttachmentView {
+            view.coordinator = context.coordinator
+            view.attachIfNeeded()
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onBegan: (TwoAxisPinchValue) -> Void
+        var onChanged: (TwoAxisPinchValue) -> Void
+        var onEnded: () -> Void
+        var onCancelled: () -> Void
+
+        private lazy var recognizer: UIPinchGestureRecognizer = {
+            let recognizer = UIPinchGestureRecognizer(
+                target: self,
+                action: #selector(handlePinch(_:))
+            )
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        private weak var attachedView: UIView?
+        private weak var targetView: UIView?
+        private var initialSpan: CGSize?
+
+        init(
+            onBegan: @escaping (TwoAxisPinchValue) -> Void,
+            onChanged: @escaping (TwoAxisPinchValue) -> Void,
+            onEnded: @escaping () -> Void,
+            onCancelled: @escaping () -> Void
+        ) {
+            self.onBegan = onBegan
+            self.onChanged = onChanged
+            self.onEnded = onEnded
+            self.onCancelled = onCancelled
+        }
+
+        func attach(to view: UIView, targetView: UIView) {
+            if attachedView === view {
+                self.targetView = targetView
+                return
+            }
+            attachedView?.removeGestureRecognizer(recognizer)
+            view.addGestureRecognizer(recognizer)
+            attachedView = view
+            self.targetView = targetView
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+
+        @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            guard recognizer.numberOfTouches >= 2,
+                  let view = recognizer.view,
+                  let targetView else {
+                if recognizer.state == .cancelled || recognizer.state == .failed {
+                    onCancelled()
+                    initialSpan = nil
+                }
+                return
+            }
+
+            let firstPointInHost = recognizer.location(ofTouch: 0, in: view)
+            let secondPointInHost = recognizer.location(ofTouch: 1, in: view)
+            let firstPoint = targetView.convert(firstPointInHost, from: view)
+            let secondPoint = targetView.convert(secondPointInHost, from: view)
+            let currentSpan = CGSize(
+                width: abs(secondPoint.x - firstPoint.x),
+                height: abs(secondPoint.y - firstPoint.y)
+            )
+            let center = CGPoint(
+                x: (firstPoint.x + secondPoint.x) / 2,
+                y: (firstPoint.y + secondPoint.y) / 2
+            )
+
+            guard targetView.bounds.insetBy(dx: -24, dy: -24).contains(center) else {
+                if recognizer.state == .ended {
+                    onEnded()
+                    initialSpan = nil
+                } else if recognizer.state == .cancelled || recognizer.state == .failed {
+                    onCancelled()
+                    initialSpan = nil
+                }
+                return
+            }
+
+            switch recognizer.state {
+            case .began:
+                initialSpan = currentSpan
+                onBegan(
+                    TwoAxisPinchValue(center: center, span: currentSpan)
+                )
+            case .changed:
+                _ = initialSpan ?? currentSpan
+                onChanged(
+                    TwoAxisPinchValue(center: center, span: currentSpan)
+                )
+            case .ended:
+                onEnded()
+                initialSpan = nil
+            case .cancelled, .failed:
+                onCancelled()
+                initialSpan = nil
+            default:
+                break
+            }
+        }
+    }
+}
+
+private final class PinchGestureAttachmentView: UIView {
+    weak var coordinator: TwoAxisPinchCaptureView.Coordinator?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        attachIfNeeded()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        attachIfNeeded()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        attachIfNeeded()
+    }
+
+    func attachIfNeeded() {
+        if let window {
+            coordinator?.attach(to: window, targetView: self)
+        }
+    }
+}
+
+private extension CGFloat {
+    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
 
