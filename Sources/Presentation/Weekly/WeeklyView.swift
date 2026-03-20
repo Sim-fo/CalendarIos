@@ -5,6 +5,7 @@ struct WeeklyView: View {
     @ObservedObject var viewModel: WeeklyViewModel
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
+    @State private var timelineScrollOffset: CGFloat = 0
 
     private let hourHeight: CGFloat = 72
     private let timeColumnWidth: CGFloat = 58
@@ -128,58 +129,53 @@ struct WeeklyView: View {
                 .background(CalendarColor.cardBackground)
 
                 ScrollView(.vertical, showsIndicators: true) {
-                    HStack(alignment: .top, spacing: 0) {
-                        TimeColumnView(
-                            calendar: calendar,
-                            hourHeight: hourHeight,
-                            width: timeColumnWidth
-                        )
-
-                        ForEach(viewModel.sections) { section in
-                            WeeklyTimelineDayColumn(
-                                section: section,
+                    ObservableScrollView {
+                        HStack(alignment: .top, spacing: 0) {
+                            TimeColumnView(
                                 calendar: calendar,
-                                width: dayColumnWidth,
                                 hourHeight: hourHeight,
-                                timelineHeight: timelineHeight,
-                                selectionSlotMinutes: selectionSlotMinutes,
-                                longPressDuration: longPressDuration,
-                                guideState: guideState,
-                                onGuideStart: { selectedDate in
-                                    withAnimation(.easeOut(duration: 0.12)) {
-                                        guideState = WeeklySelectionGuide.make(
-                                            from: selectedDate,
-                                            calendar: calendar,
-                                            slotMinutes: selectionSlotMinutes
-                                        )
-                                    }
-                                },
-                                onGuideChange: { selectedDate in
-                                    guideState = WeeklySelectionGuide.make(
-                                        from: selectedDate,
-                                        calendar: calendar,
-                                        slotMinutes: selectionSlotMinutes
-                                    )
-                                },
-                                onGuideCommit: { selectedDate in
-                                    let quantized = WeeklySelectionGuide.make(
-                                        from: selectedDate,
-                                        calendar: calendar,
-                                        slotMinutes: selectionSlotMinutes
-                                    ).date
-                                    withAnimation(.easeOut(duration: 0.12)) {
-                                        guideState = nil
-                                    }
-                                    viewModel.openNewEvent(at: quantized)
-                                },
-                                onGuideCancel: {
-                                    withAnimation(.easeOut(duration: 0.12)) {
-                                        guideState = nil
-                                    }
-                                },
-                                onEventTap: viewModel.openEditor(for:)
+                                width: timeColumnWidth
                             )
+
+                            ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
+                                WeeklyTimelineDayColumn(
+                                    section: section,
+                                    sectionIndex: index,
+                                    dayCount: viewModel.sections.count,
+                                    calendar: calendar,
+                                    width: dayColumnWidth,
+                                    hourHeight: hourHeight,
+                                    timelineHeight: timelineHeight,
+                                    selectionSlotMinutes: selectionSlotMinutes,
+                                    longPressDuration: longPressDuration,
+                                    guideState: guideState,
+                                    scrollOffsetY: timelineScrollOffset,
+                                    onGuideStart: { point in
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            guideState = makeGuideState(from: point, fallbackIndex: index)
+                                        }
+                                    },
+                                    onGuideChange: { point in
+                                        guideState = makeGuideState(from: point, fallbackIndex: index)
+                                    },
+                                    onGuideCommit: { point in
+                                        let quantized = makeGuideState(from: point, fallbackIndex: index)
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            guideState = nil
+                                        }
+                                        viewModel.openNewEvent(at: quantized.date)
+                                    },
+                                    onGuideCancel: {
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            guideState = nil
+                                        }
+                                    },
+                                    onEventTap: viewModel.openEditor(for:)
+                                )
+                            }
                         }
+                    } onOffsetChange: { newOffset in
+                        timelineScrollOffset = newOffset
                     }
                 }
             }
@@ -210,6 +206,33 @@ struct WeeklyView: View {
             return nil
         }
         return { viewModel.deleteCurrentEvent() }
+    }
+
+    private func makeGuideState(from point: CGPoint, fallbackIndex: Int) -> WeeklySelectionGuide {
+        let effectiveDayWidth = max(dayColumnWidth, 1)
+        let rawDayIndex = Int(floor(point.x / effectiveDayWidth))
+        let clampedDayIndex = min(max(rawDayIndex, 0), max(viewModel.sections.count - 1, 0))
+        let resolvedIndex = viewModel.sections.indices.contains(clampedDayIndex) ? clampedDayIndex : fallbackIndex
+        let resolvedSection = viewModel.sections[resolvedIndex]
+
+        let visibleY = max(point.y + timelineScrollOffset, 0)
+        let maxMinutes = 24 * 60 - selectionSlotMinutes
+        let rawMinutes = Int((visibleY / hourHeight) * 60)
+        let quantizedMinutes = ((rawMinutes / selectionSlotMinutes) * selectionSlotMinutes).clamped(to: 0...maxMinutes)
+        let hour = quantizedMinutes / 60
+        let minute = quantizedMinutes % 60
+
+        let selectedDate = calendar.date(
+            bySettingHour: hour,
+            minute: minute,
+            second: 0,
+            of: resolvedSection.date
+        ) ?? resolvedSection.date
+
+        return WeeklySelectionGuide(
+            date: selectedDate,
+            minuteOfDay: quantizedMinutes
+        )
     }
 }
 
@@ -282,6 +305,8 @@ private struct TimeColumnView: View {
 
 private struct WeeklyTimelineDayColumn: View {
     let section: WeekDaySection
+    let sectionIndex: Int
+    let dayCount: Int
     let calendar: Calendar
     let width: CGFloat
     let hourHeight: CGFloat
@@ -289,9 +314,10 @@ private struct WeeklyTimelineDayColumn: View {
     let selectionSlotMinutes: Int
     let longPressDuration: TimeInterval
     let guideState: WeeklySelectionGuide?
-    let onGuideStart: (Date) -> Void
-    let onGuideChange: (Date) -> Void
-    let onGuideCommit: (Date) -> Void
+    let scrollOffsetY: CGFloat
+    let onGuideStart: (CGPoint) -> Void
+    let onGuideChange: (CGPoint) -> Void
+    let onGuideCommit: (CGPoint) -> Void
     let onGuideCancel: () -> Void
     let onEventTap: (CalendarEvent) -> Void
 
@@ -303,13 +329,13 @@ private struct WeeklyTimelineDayColumn: View {
                     LongPressCaptureView(
                         minimumDuration: longPressDuration,
                         onBegan: { point in
-                            onGuideStart(date(at: point.y))
+                            onGuideStart(globalPoint(from: point))
                         },
                         onChanged: { point in
-                            onGuideChange(date(at: point.y))
+                            onGuideChange(globalPoint(from: point))
                         },
                         onEnded: { point in
-                            onGuideCommit(date(at: point.y))
+                            onGuideCommit(globalPoint(from: point))
                         },
                         onCancelled: onGuideCancel
                     )
@@ -407,6 +433,13 @@ private struct WeeklyTimelineDayColumn: View {
 
     private func guideOffsetY(for guideState: WeeklySelectionGuide) -> CGFloat {
         CGFloat(guideState.minuteOfDay) / 60 * hourHeight
+    }
+
+    private func globalPoint(from localPoint: CGPoint) -> CGPoint {
+        CGPoint(
+            x: CGFloat(sectionIndex) * width + localPoint.x,
+            y: localPoint.y
+        )
     }
 }
 
@@ -682,6 +715,49 @@ private struct LongPressCaptureView: UIViewRepresentable {
                 break
             }
         }
+    }
+}
+
+private struct ObservableScrollView<Content: View>: View {
+    let content: () -> Content
+    let onOffsetChange: (CGFloat) -> Void
+
+    init(
+        @ViewBuilder content: @escaping () -> Content,
+        onOffsetChange: @escaping (CGFloat) -> Void
+    ) {
+        self.content = content
+        self.onOffsetChange = onOffsetChange
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            content()
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(key: VerticalScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("weeklyTimelineScroll")).minY)
+                    }
+                )
+        }
+        .coordinateSpace(name: "weeklyTimelineScroll")
+        .onPreferenceChange(VerticalScrollOffsetPreferenceKey.self) { minY in
+            onOffsetChange(-minY)
+        }
+    }
+}
+
+private struct VerticalScrollOffsetPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private extension Int {
+    func clamped(to range: ClosedRange<Int>) -> Int {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
 
