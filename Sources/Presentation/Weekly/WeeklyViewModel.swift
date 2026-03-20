@@ -58,8 +58,13 @@ final class WeeklyViewModel: ObservableObject {
     }
 
     func openNewEvent(on date: Date) {
+        openNewEvent(at: calendar.dateBySettingHour(9, minute: 0, on: date))
+    }
+
+    func openNewEvent(at date: Date) {
         eventBeingEditedID = nil
         editorDraft = EventDraft.empty(on: date, calendar: calendar)
+        editorDraft.startAt = quantizedDate(date, stepMinutes: 30)
         isPresentingEditor = true
     }
 
@@ -157,5 +162,14 @@ final class WeeklyViewModel: ObservableObject {
         Task {
             await reloadWeek()
         }
+    }
+
+    private func quantizedDate(_ date: Date, stepMinutes: Int) -> Date {
+        let step = max(stepMinutes, 1)
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let minutes = components.minute ?? 0
+        components.minute = (minutes / step) * step
+        components.second = 0
+        return calendar.date(from: components) ?? date
     }
 }

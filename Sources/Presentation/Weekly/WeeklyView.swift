@@ -1,12 +1,16 @@
 import SwiftUI
+import UIKit
 
 struct WeeklyView: View {
     @ObservedObject var viewModel: WeeklyViewModel
     private let calendar: Calendar
+    @State private var guideState: WeeklySelectionGuide?
 
     private let hourHeight: CGFloat = 72
     private let timeColumnWidth: CGFloat = 58
     private let dayColumnWidth: CGFloat = 178
+    private let selectionSlotMinutes = 30
+    private let longPressDuration = 0.25
 
     init(viewModel: WeeklyViewModel, calendar: Calendar = .current) {
         self.viewModel = viewModel
@@ -21,6 +25,14 @@ struct WeeklyView: View {
 
                 VStack(spacing: 16) {
                     header
+
+                    if let guideState {
+                        SelectionTimeHeaderView(
+                            selectedDate: guideState.date,
+                            calendar: calendar
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
 
                     if viewModel.isLoading && viewModel.sections.isEmpty {
                         ProgressView("Loading week...")
@@ -37,7 +49,7 @@ struct WeeklyView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        viewModel.openNewEvent(on: Date())
+                        viewModel.openNewEvent(at: Date())
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -130,6 +142,41 @@ struct WeeklyView: View {
                                 width: dayColumnWidth,
                                 hourHeight: hourHeight,
                                 timelineHeight: timelineHeight,
+                                selectionSlotMinutes: selectionSlotMinutes,
+                                longPressDuration: longPressDuration,
+                                guideState: guideState,
+                                onGuideStart: { selectedDate in
+                                    withAnimation(.easeOut(duration: 0.12)) {
+                                        guideState = WeeklySelectionGuide.make(
+                                            from: selectedDate,
+                                            calendar: calendar,
+                                            slotMinutes: selectionSlotMinutes
+                                        )
+                                    }
+                                },
+                                onGuideChange: { selectedDate in
+                                    guideState = WeeklySelectionGuide.make(
+                                        from: selectedDate,
+                                        calendar: calendar,
+                                        slotMinutes: selectionSlotMinutes
+                                    )
+                                },
+                                onGuideCommit: { selectedDate in
+                                    let quantized = WeeklySelectionGuide.make(
+                                        from: selectedDate,
+                                        calendar: calendar,
+                                        slotMinutes: selectionSlotMinutes
+                                    ).date
+                                    withAnimation(.easeOut(duration: 0.12)) {
+                                        guideState = nil
+                                    }
+                                    viewModel.openNewEvent(at: quantized)
+                                },
+                                onGuideCancel: {
+                                    withAnimation(.easeOut(duration: 0.12)) {
+                                        guideState = nil
+                                    }
+                                },
                                 onEventTap: viewModel.openEditor(for:)
                             )
                         }
@@ -239,17 +286,50 @@ private struct WeeklyTimelineDayColumn: View {
     let width: CGFloat
     let hourHeight: CGFloat
     let timelineHeight: CGFloat
+    let selectionSlotMinutes: Int
+    let longPressDuration: TimeInterval
+    let guideState: WeeklySelectionGuide?
+    let onGuideStart: (Date) -> Void
+    let onGuideChange: (Date) -> Void
+    let onGuideCommit: (Date) -> Void
+    let onGuideCancel: () -> Void
     let onEventTap: (CalendarEvent) -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            dayBackground
+            Rectangle()
+                .fill(section.isToday ? Color.accentColor.opacity(0.06) : Color.clear)
+                .overlay {
+                    LongPressCaptureView(
+                        minimumDuration: longPressDuration,
+                        onBegan: { point in
+                            onGuideStart(date(at: point.y))
+                        },
+                        onChanged: { point in
+                            onGuideChange(date(at: point.y))
+                        },
+                        onEnded: { point in
+                            onGuideCommit(date(at: point.y))
+                        },
+                        onCancelled: onGuideCancel
+                    )
+                }
 
             ForEach(hourMarkers, id: \.self) { hour in
                 Rectangle()
                     .fill(hour == currentHour ? currentHourColor : Color.primary.opacity(0.06))
                     .frame(height: hour == currentHour ? 1.5 : 1)
                     .offset(y: CGFloat(hour) * hourHeight)
+            }
+
+            if let guideState, calendar.isDate(guideState.date, inSameDayAs: section.date) {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.12))
+
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.28))
+                    .frame(height: CGFloat(selectionSlotMinutes) / 60 * hourHeight)
+                    .offset(y: guideOffsetY(for: guideState))
             }
 
             if section.isToday {
@@ -278,11 +358,6 @@ private struct WeeklyTimelineDayColumn: View {
                 .fill(Color.primary.opacity(0.08))
                 .frame(width: 1)
         }
-    }
-
-    private var dayBackground: some View {
-        Rectangle()
-            .fill(section.isToday ? Color.accentColor.opacity(0.06) : Color.clear)
     }
 
     private var hourMarkers: [Int] {
@@ -315,6 +390,23 @@ private struct WeeklyTimelineDayColumn: View {
             columnWidth: width,
             hourHeight: hourHeight
         )
+    }
+
+    private func date(at yOffset: CGFloat) -> Date {
+        let clampedY = min(max(yOffset, 0), timelineHeight)
+        let totalMinutes = Int((clampedY / hourHeight) * 60)
+        let hour = min(max(totalMinutes / 60, 0), 23)
+        let minute = min(max(totalMinutes % 60, 0), 59)
+        return calendar.date(
+            bySettingHour: hour,
+            minute: minute,
+            second: 0,
+            of: section.date
+        ) ?? section.date
+    }
+
+    private func guideOffsetY(for guideState: WeeklySelectionGuide) -> CGFloat {
+        CGFloat(guideState.minuteOfDay) / 60 * hourHeight
     }
 }
 
@@ -450,6 +542,146 @@ private struct WeeklyTimelineEventLayout: Identifiable {
         }
 
         return clusters
+    }
+}
+
+private struct WeeklySelectionGuide: Equatable {
+    let date: Date
+    let minuteOfDay: Int
+
+    static func make(from date: Date, calendar: Calendar, slotMinutes: Int) -> WeeklySelectionGuide {
+        let step = max(slotMinutes, 1)
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let hour = components.hour ?? 0
+        let minute = components.minute ?? 0
+        let totalMinutes = ((hour * 60 + minute) / step) * step
+        let normalizedHour = min(max(totalMinutes / 60, 0), 23)
+        let normalizedMinute = min(max(totalMinutes % 60, 0), 59)
+        let normalizedDate = calendar.date(
+            bySettingHour: normalizedHour,
+            minute: normalizedMinute,
+            second: 0,
+            of: date
+        ) ?? date
+
+        return WeeklySelectionGuide(
+            date: normalizedDate,
+            minuteOfDay: normalizedHour * 60 + normalizedMinute
+        )
+    }
+}
+
+private struct SelectionTimeHeaderView: View {
+    let selectedDate: Date
+    let calendar: Calendar
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(timeText)
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .monospacedDigit()
+
+            Text(dateText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(CalendarColor.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private var timeText: String {
+        CalendarDateFormatter.time(for: selectedDate, calendar: calendar)
+    }
+
+    private var dateText: String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        return formatter.string(from: selectedDate)
+    }
+}
+
+private struct LongPressCaptureView: UIViewRepresentable {
+    let minimumDuration: TimeInterval
+    let onBegan: (CGPoint) -> Void
+    let onChanged: (CGPoint) -> Void
+    let onEnded: (CGPoint) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onBegan: onBegan,
+            onChanged: onChanged,
+            onEnded: onEnded,
+            onCancelled: onCancelled
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let recognizer = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleLongPress(_:))
+        )
+        recognizer.minimumPressDuration = minimumDuration
+        recognizer.allowableMovement = 18
+        recognizer.cancelsTouchesInView = true
+        view.addGestureRecognizer(recognizer)
+
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        guard let recognizer = uiView.gestureRecognizers?.first as? UILongPressGestureRecognizer else {
+            return
+        }
+        recognizer.minimumPressDuration = minimumDuration
+    }
+
+    final class Coordinator: NSObject {
+        private let onBegan: (CGPoint) -> Void
+        private let onChanged: (CGPoint) -> Void
+        private let onEnded: (CGPoint) -> Void
+        private let onCancelled: () -> Void
+
+        init(
+            onBegan: @escaping (CGPoint) -> Void,
+            onChanged: @escaping (CGPoint) -> Void,
+            onEnded: @escaping (CGPoint) -> Void,
+            onCancelled: @escaping () -> Void
+        ) {
+            self.onBegan = onBegan
+            self.onChanged = onChanged
+            self.onEnded = onEnded
+            self.onCancelled = onCancelled
+        }
+
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            let point = recognizer.location(in: recognizer.view)
+
+            switch recognizer.state {
+            case .began:
+                onBegan(point)
+            case .changed:
+                onChanged(point)
+            case .ended:
+                onEnded(point)
+            case .cancelled, .failed:
+                onCancelled()
+            default:
+                break
+            }
+        }
     }
 }
 
