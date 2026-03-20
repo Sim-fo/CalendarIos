@@ -16,7 +16,7 @@ struct WeeklyView: View {
     @State private var horizontalScrollOffset: CGFloat = 0
     @State private var horizontalViewportWidth: CGFloat = 0
     @State private var hourHeight: CGFloat = 72
-    @State private var dayColumnWidth: CGFloat = 178
+    @State private var dayColumnWidth: CGFloat = 88
     @State private var pinchInteraction: WeeklyPinchInteraction?
     @State private var didRestoreInitialHorizontalPosition = false
     private let verticalScrollBridge = ScrollViewBridge()
@@ -30,9 +30,8 @@ struct WeeklyView: View {
     private let longPressDuration = 0.25
     private let autoScrollEdgeThreshold: CGFloat = 64
     private let autoScrollStep: CGFloat = 10
-    private let minimumHourHeight: CGFloat = 44
     private let maximumHourHeight: CGFloat = 132
-    private let minimumDayColumnWidth: CGFloat = 104
+    private let minimumDayColumnWidth: CGFloat = 72
     private let maximumDayColumnWidth: CGFloat = 320
     private let horizontalPinchSensitivity: CGFloat = 0.8
     private let verticalPinchSensitivity: CGFloat = 0.9
@@ -239,6 +238,13 @@ struct WeeklyView: View {
         visibleSections.last?.date
     }
 
+    private var isTodayVisible: Bool {
+        let today = calendar.startOfDay(for: Date())
+        return visibleSections.contains { section in
+            calendar.isDate(section.date, inSameDayAs: today)
+        }
+    }
+
     private var visibleSections: ArraySlice<WeekDaySection> {
         guard !viewModel.sections.isEmpty else { return [] }
 
@@ -327,6 +333,91 @@ struct WeeklyView: View {
             from: calendar.startOfDay(for: startDate),
             to: calendar.startOfDay(for: endDate)
         ).day ?? 0
+    }
+
+    private func jumpToToday() {
+        let today = calendar.startOfDay(for: Date())
+        viewModel.showCurrentWeek()
+
+        if let dayIndex = viewModel.sections.firstIndex(where: { calendar.isDate($0.date, inSameDayAs: today) }),
+           let horizontalScrollView = horizontalScrollBridge.scrollView {
+            let targetOffsetX = max(CGFloat(dayIndex) * dayColumnWidth, 0)
+            let maxOffsetX = max(horizontalScrollView.contentSize.width - horizontalScrollView.bounds.width, 0)
+            let clampedOffsetX = min(targetOffsetX, maxOffsetX)
+            horizontalScrollView.setContentOffset(
+                CGPoint(x: clampedOffsetX, y: horizontalScrollView.contentOffset.y),
+                animated: true
+            )
+            horizontalScrollOffset = clampedOffsetX
+        }
+
+        if let verticalScrollView = verticalScrollBridge.scrollView {
+            let components = calendar.dateComponents([.hour, .minute], from: Date())
+            let currentHour = CGFloat(components.hour ?? 0)
+            let currentMinute = CGFloat(components.minute ?? 0)
+            let targetOffsetY = ((currentHour * 60) + currentMinute) / 60 * hourHeight
+            let maxOffsetY = max(verticalScrollView.contentSize.height - verticalScrollView.bounds.height, 0)
+            let clampedOffsetY = min(max(targetOffsetY - hourHeight, 0), maxOffsetY)
+            verticalScrollView.setContentOffset(
+                CGPoint(x: verticalScrollView.contentOffset.x, y: clampedOffsetY),
+                animated: true
+            )
+            timelineScrollOffset = clampedOffsetY
+        }
+    }
+
+    private var minimumFittingHourHeight: CGFloat {
+        max(verticalViewportHeight / 24, 1)
+    }
+
+    private func applyVerticalZoom(targetHourHeight: CGFloat, showFullDay: Bool) {
+        let clampedHeight = targetHourHeight.clamped(to: minimumFittingHourHeight...maximumHourHeight)
+        guard clampedHeight != hourHeight || showFullDay else { return }
+
+        let viewportHeight = max(verticalViewportHeight, 0)
+        let currentHourHeight = max(hourHeight, 1)
+        let viewportCenter = viewportHeight / 2
+        let currentOffset = verticalScrollBridge.scrollView?.contentOffset.y ?? timelineScrollOffset
+        let anchorHour = if viewportHeight > 0 && !showFullDay {
+            ((currentOffset + viewportCenter) / currentHourHeight).clamped(to: 0.0...23.0)
+        } else {
+            0.0
+        }
+
+        hourHeight = clampedHeight
+
+        DispatchQueue.main.async {
+            guard let scrollView = verticalScrollBridge.scrollView else { return }
+
+            if showFullDay || viewportHeight <= 0 {
+                scrollView.setContentOffset(
+                    CGPoint(x: scrollView.contentOffset.x, y: 0),
+                    animated: false
+                )
+                timelineScrollOffset = 0
+                return
+            }
+
+            let maxOffset = max((clampedHeight * 24) - viewportHeight, 0)
+            let targetOffset = ((anchorHour * clampedHeight) - viewportCenter).clamped(to: 0...maxOffset)
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: targetOffset),
+                animated: false
+            )
+            timelineScrollOffset = targetOffset
+        }
+    }
+
+    private func zoomInVertically() {
+        applyVerticalZoom(targetHourHeight: hourHeight + 8, showFullDay: false)
+    }
+
+    private func zoomOutVertically() {
+        applyVerticalZoom(targetHourHeight: hourHeight - 8, showFullDay: false)
+    }
+
+    private func zoomToFullDay() {
+        applyVerticalZoom(targetHourHeight: minimumFittingHourHeight, showFullDay: true)
     }
 
     private var weeklyTimeline: some View {
@@ -447,7 +538,12 @@ struct WeeklyView: View {
             )
 
             VStack(spacing: 0) {
-                TimeColumnHeaderPlaceholder(width: timeColumnWidth, height: dayHeaderHeight)
+                TimeColumnHeaderPlaceholder(
+                    width: timeColumnWidth,
+                    height: dayHeaderHeight,
+                    showsTodayButton: !isTodayVisible,
+                    onTodayTap: jumpToToday
+                )
 
                 GeometryReader { proxy in
                     TimeColumnView(
@@ -469,6 +565,16 @@ struct WeeklyView: View {
                 onCancelled: endPinch
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            VStack(spacing: 2) {
+                zoomControlButton(systemName: "plus.magnifyingglass", action: zoomInVertically)
+                zoomControlButton(systemName: "minus.magnifyingglass", action: zoomOutVertically)
+                zoomControlButton(systemName: "arrow.up.left.and.down.right", action: zoomToFullDay)
+            }
+            .padding(.top, dayHeaderHeight + 10)
+            .padding(.trailing, 6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .zIndex(2)
         }
         .background(Color(uiColor: .systemBackground))
         .overlay(
@@ -477,14 +583,19 @@ struct WeeklyView: View {
                 .frame(height: 1),
             alignment: .top
         )
-        .overlay(
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1),
-            alignment: .bottom
-        )
-        .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func zoomControlButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(Color.primary.opacity(0.45))
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var errorBinding: Binding<Bool> {
@@ -737,7 +848,7 @@ struct WeeklyView: View {
         let targetDayWidth = (interaction.startDayColumnWidth * horizontalScale)
             .clamped(to: minimumDayColumnWidth...maximumDayColumnWidth)
         let targetHourHeight = (interaction.startHourHeight * verticalScale)
-            .clamped(to: minimumHourHeight...maximumHourHeight)
+            .clamped(to: minimumFittingHourHeight...maximumHourHeight)
 
         guard targetDayWidth != dayColumnWidth || targetHourHeight != hourHeight else { return }
 
@@ -881,11 +992,24 @@ private struct TimeColumnView: View {
 private struct TimeColumnHeaderPlaceholder: View {
     let width: CGFloat
     let height: CGFloat
+    let showsTodayButton: Bool
+    let onTodayTap: () -> Void
 
     var body: some View {
         Rectangle()
             .fill(Color(uiColor: .tertiarySystemGroupedBackground))
             .frame(width: width, height: height)
+            .overlay {
+                if showsTodayButton {
+                    Button(action: onTodayTap) {
+                        Image(systemName: "scope")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.tint)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             .overlay(alignment: .trailing) {
                 Rectangle()
                     .fill(Color.primary.opacity(0.08))
@@ -1626,12 +1750,6 @@ private struct ObservableScrollView<Content: View>: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             content()
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear
-                            .preference(key: VerticalScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("weeklyTimelineScroll")).minY)
-                    }
-                )
         }
         .background(
             GeometryReader { proxy in
@@ -1644,24 +1762,14 @@ private struct ObservableScrollView<Content: View>: View {
                     }
             }
         )
-        .coordinateSpace(name: "weeklyTimelineScroll")
-        .onPreferenceChange(VerticalScrollOffsetPreferenceKey.self) { minY in
-            onOffsetChange(-minY)
-        }
         .background(
             ScrollViewResolverView(axis: .vertical) { scrollView in
-                bridge.scrollView = scrollView
+                bridge.bind(to: scrollView) { offset in
+                    onOffsetChange(offset.y)
+                }
                 onScrollViewResolved(scrollView)
             }
         )
-    }
-}
-
-private struct VerticalScrollOffsetPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 
