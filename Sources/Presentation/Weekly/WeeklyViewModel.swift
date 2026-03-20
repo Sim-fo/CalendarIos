@@ -117,6 +117,26 @@ final class WeeklyViewModel: ObservableObject {
         }
     }
 
+    func applyInlineUpdate(from original: CalendarEvent, to updated: CalendarEvent) {
+        guard original.startAt != updated.startAt || original.durationMinutes != updated.durationMinutes else {
+            return
+        }
+
+        errorMessage = nil
+
+        Task {
+            do {
+                var draft = EventDraft(event: original)
+                draft.startAt = updated.startAt
+                draft.durationMinutes = updated.durationMinutes
+                _ = try await eventRepository.upsert(draft)
+                await reloadWeek()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func loadInitialState() async {
         isLoading = true
         errorMessage = nil

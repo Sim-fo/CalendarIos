@@ -8,6 +8,7 @@ struct WeeklyView: View {
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
     @State private var guideInteraction: WeeklyGuideInteraction?
+    @State private var activeEventInteraction: WeeklyEventInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
     @State private var verticalViewportHeight: CGFloat = 0
     @State private var hasResolvedScrollView = false
@@ -18,6 +19,8 @@ struct WeeklyView: View {
     private let timeColumnWidth: CGFloat = 58
     private let dayColumnWidth: CGFloat = 178
     private let selectionSlotMinutes = 30
+    private let manipulationSlotMinutes = 15
+    private let minimumEventDurationMinutes = 15
     private let longPressDuration = 0.25
     private let autoScrollEdgeThreshold: CGFloat = 64
     private let autoScrollStep: CGFloat = 10
@@ -142,12 +145,13 @@ struct WeeklyView: View {
 
     private var weeklyTimeline: some View {
         let timelineHeight = hourHeight * 24
+        let displayedSections = resolvedSections
 
         return ZStack(alignment: .topLeading) {
             ScrollView(.horizontal, showsIndicators: true) {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
-                        ForEach(viewModel.sections) { section in
+                        ForEach(displayedSections) { section in
                             WeeklyDayHeader(
                                 section: section,
                                 calendar: calendar,
@@ -166,11 +170,11 @@ struct WeeklyView: View {
                         },
                         content: {
                             HStack(alignment: .top, spacing: 0) {
-                                ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
+                                ForEach(Array(displayedSections.enumerated()), id: \.element.id) { index, section in
                                     WeeklyTimelineDayColumn(
                                         section: section,
                                         sectionIndex: index,
-                                        dayCount: viewModel.sections.count,
+                                        dayCount: displayedSections.count,
                                         calendar: calendar,
                                         width: dayColumnWidth,
                                         hourHeight: hourHeight,
@@ -179,6 +183,7 @@ struct WeeklyView: View {
                                         longPressDuration: longPressDuration,
                                         guideState: guideState,
                                         scrollOffsetY: timelineScrollOffset,
+                                        activeEventID: activeEventInteraction?.eventID,
                                         onGuideStart: { point in
                                             guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
                                             withAnimation(.easeOut(duration: 0.12)) {
@@ -204,7 +209,21 @@ struct WeeklyView: View {
                                                 guideState = nil
                                             }
                                         },
-                                        onEventTap: viewModel.openEditor(for:)
+                                        onEventTap: viewModel.openEditor(for:),
+                                        onEventMoveStart: { event, point in
+                                            beginEventMove(for: event, at: point, fallbackIndex: index)
+                                        },
+                                        onEventMoveChange: { event, point in
+                                            updateEventMove(for: event, at: point, fallbackIndex: index)
+                                        },
+                                        onEventResizeStart: { event, point in
+                                            beginEventResize(for: event, at: point, fallbackIndex: index)
+                                        },
+                                        onEventResizeChange: { event, point in
+                                            updateEventResize(for: event, at: point, fallbackIndex: index)
+                                        },
+                                        onEventInteractionCommit: commitActiveEventInteraction,
+                                        onEventInteractionCancel: cancelActiveEventInteraction
                                     )
                                 }
                             }
@@ -261,11 +280,143 @@ struct WeeklyView: View {
         )
     }
 
+    private var resolvedSections: [WeekDaySection] {
+        guard let interaction = activeEventInteraction else {
+            return viewModel.sections
+        }
+
+        return viewModel.sections.map { section in
+            var events = section.events.filter { $0.id != interaction.eventID }
+            if calendar.isDate(interaction.previewEvent.startAt, inSameDayAs: section.date) {
+                events.append(interaction.previewEvent)
+                events.sort { lhs, rhs in
+                    if lhs.startAt == rhs.startAt {
+                        return lhs.durationMinutes < rhs.durationMinutes
+                    }
+                    return lhs.startAt < rhs.startAt
+                }
+            }
+
+            return WeekDaySection(
+                id: section.id,
+                date: section.date,
+                isToday: section.isToday,
+                events: events
+            )
+        }
+    }
+
     private var deleteAction: (() -> Void)? {
         guard viewModel.editorDraft.id != nil else {
             return nil
         }
         return { viewModel.deleteCurrentEvent() }
+    }
+
+    private func beginEventMove(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+        let anchorMinutes = Int((point.y / hourHeight) * 60).clamped(to: 0...max(event.durationMinutes - 1, 0))
+        activeEventInteraction = WeeklyEventInteraction(
+            eventID: event.id,
+            originalEvent: event,
+            previewEvent: event,
+            mode: .move(anchorMinutes: anchorMinutes),
+            fallbackIndex: fallbackIndex
+        )
+    }
+
+    private func updateEventMove(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+        guard var interaction = activeEventInteraction, interaction.eventID == event.id else { return }
+        let resolvedFallbackIndex = fallbackIndex
+
+        let anchorMinutes: Int
+        switch interaction.mode {
+        case .move(let storedAnchorMinutes):
+            anchorMinutes = storedAnchorMinutes
+        case .resize:
+            return
+        }
+
+        let targetDayIndex = resolvedDayIndex(from: point.x, fallbackIndex: resolvedFallbackIndex)
+        let touchMinute = quantizedMinute(from: point.y, stepMinutes: manipulationSlotMinutes)
+        let maxStartMinute = max((24 * 60) - event.durationMinutes, 0)
+        let startMinute = (touchMinute - anchorMinutes).clamped(to: 0...maxStartMinute)
+        let startAt = date(for: targetDayIndex, minuteOfDay: startMinute)
+
+        interaction.previewEvent = event.updating(startAt: startAt)
+        interaction.fallbackIndex = targetDayIndex
+        activeEventInteraction = interaction
+    }
+
+    private func beginEventResize(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+        let preview = event.updating(durationMinutes: max(minimumEventDurationMinutes, event.durationMinutes))
+        activeEventInteraction = WeeklyEventInteraction(
+            eventID: event.id,
+            originalEvent: event,
+            previewEvent: preview,
+            mode: .resize,
+            fallbackIndex: fallbackIndex
+        )
+        updateEventResize(for: event, at: point, fallbackIndex: fallbackIndex)
+    }
+
+    private func updateEventResize(for event: CalendarEvent, at point: CGPoint, fallbackIndex: Int) {
+        guard var interaction = activeEventInteraction, interaction.eventID == event.id else { return }
+        guard case .resize = interaction.mode else { return }
+
+        let startMinute = minuteOfDay(for: interaction.previewEvent.startAt)
+        let maxDuration = max((24 * 60) - startMinute, minimumEventDurationMinutes)
+        let endMinute = quantizedMinute(from: point.y, stepMinutes: manipulationSlotMinutes)
+        let duration = (endMinute - startMinute).clamped(to: minimumEventDurationMinutes...maxDuration)
+
+        interaction.previewEvent = interaction.previewEvent.updating(durationMinutes: duration)
+        interaction.fallbackIndex = fallbackIndex
+        activeEventInteraction = interaction
+    }
+
+    private func commitActiveEventInteraction() {
+        guard let interaction = activeEventInteraction else { return }
+        activeEventInteraction = nil
+        viewModel.applyInlineUpdate(from: interaction.originalEvent, to: interaction.previewEvent)
+    }
+
+    private func cancelActiveEventInteraction() {
+        activeEventInteraction = nil
+    }
+
+    private func resolvedDayIndex(from x: CGFloat, fallbackIndex: Int) -> Int {
+        let effectiveDayWidth = max(dayColumnWidth, 1)
+        let rawDayIndex = Int(floor(x / effectiveDayWidth))
+        let maxIndex = max(viewModel.sections.count - 1, 0)
+        return rawDayIndex.clamped(to: 0...maxIndex)
+    }
+
+    private func quantizedMinute(from y: CGFloat, stepMinutes: Int) -> Int {
+        let step = max(stepMinutes, 1)
+        let visibleY = max(y, 0)
+        let rawMinute = Int((visibleY / hourHeight) * 60)
+        let quantizedMinute = (rawMinute / step) * step
+        return quantizedMinute.clamped(to: 0...(24 * 60))
+    }
+
+    private func date(for dayIndex: Int, minuteOfDay: Int) -> Date {
+        guard viewModel.sections.indices.contains(dayIndex) else {
+            return viewModel.sections.first?.date ?? Date()
+        }
+
+        let sectionDate = viewModel.sections[dayIndex].date
+        let hour = min(max(minuteOfDay / 60, 0), 23)
+        let minute = min(max(minuteOfDay % 60, 0), 59)
+        return calendar.date(
+            bySettingHour: hour,
+            minute: minute,
+            second: 0,
+            of: sectionDate
+        ) ?? sectionDate
+    }
+
+    private func minuteOfDay(for date: Date) -> Int {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        return (components.hour ?? 0) * 60 + (components.minute ?? 0)
     }
 
     private var autoScrollDirection: WeeklyAutoScrollDirection? {
@@ -444,11 +595,18 @@ private struct WeeklyTimelineDayColumn: View {
     let longPressDuration: TimeInterval
     let guideState: WeeklySelectionGuide?
     let scrollOffsetY: CGFloat
+    let activeEventID: Int64?
     let onGuideStart: (CGPoint) -> Void
     let onGuideChange: (CGPoint) -> Void
     let onGuideCommit: (CGPoint) -> Void
     let onGuideCancel: () -> Void
     let onEventTap: (CalendarEvent) -> Void
+    let onEventMoveStart: (CalendarEvent, CGPoint) -> Void
+    let onEventMoveChange: (CalendarEvent, CGPoint) -> Void
+    let onEventResizeStart: (CalendarEvent, CGPoint) -> Void
+    let onEventResizeChange: (CalendarEvent, CGPoint) -> Void
+    let onEventInteractionCommit: () -> Void
+    let onEventInteractionCancel: () -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -499,12 +657,30 @@ private struct WeeklyTimelineDayColumn: View {
                     event: layout.event,
                     calendar: calendar,
                     width: layout.width,
-                    height: layout.height
+                    height: layout.height,
+                    isActive: activeEventID == layout.event.id,
+                    longPressDuration: longPressDuration,
+                    onTap: {
+                        onEventTap(layout.event)
+                    },
+                    onMoveStart: { point in
+                        onEventMoveStart(layout.event, eventGlobalPoint(from: point, layout: layout))
+                    },
+                    onMoveChange: { point in
+                        onEventMoveChange(layout.event, eventGlobalPoint(from: point, layout: layout))
+                    },
+                    onMoveCommit: onEventInteractionCommit,
+                    onMoveCancel: onEventInteractionCancel,
+                    onResizeStart: { point in
+                        onEventResizeStart(layout.event, eventGlobalPoint(from: point, layout: layout, localYInset: layout.height - WeeklyTimelineEventBlock.resizeHandleHeight))
+                    },
+                    onResizeChange: { point in
+                        onEventResizeChange(layout.event, eventGlobalPoint(from: point, layout: layout, localYInset: layout.height - WeeklyTimelineEventBlock.resizeHandleHeight))
+                    },
+                    onResizeCommit: onEventInteractionCommit,
+                    onResizeCancel: onEventInteractionCancel
                 )
                 .offset(x: layout.x, y: layout.y)
-                .onTapGesture {
-                    onEventTap(layout.event)
-                }
             }
         }
         .frame(width: width, height: timelineHeight, alignment: .topLeading)
@@ -571,6 +747,13 @@ private struct WeeklyTimelineDayColumn: View {
             y: localPoint.y
         )
     }
+
+    private func eventGlobalPoint(from localPoint: CGPoint, layout: WeeklyTimelineEventLayout, localYInset: CGFloat = 0) -> CGPoint {
+        CGPoint(
+            x: CGFloat(sectionIndex) * width + layout.x + localPoint.x,
+            y: layout.y + localYInset + localPoint.y
+        )
+    }
 }
 
 private struct WeeklyTimelineEventBlock: View {
@@ -578,6 +761,19 @@ private struct WeeklyTimelineEventBlock: View {
     let calendar: Calendar
     let width: CGFloat
     let height: CGFloat
+    let isActive: Bool
+    let longPressDuration: TimeInterval
+    let onTap: () -> Void
+    let onMoveStart: (CGPoint) -> Void
+    let onMoveChange: (CGPoint) -> Void
+    let onMoveCommit: () -> Void
+    let onMoveCancel: () -> Void
+    let onResizeStart: (CGPoint) -> Void
+    let onResizeChange: (CGPoint) -> Void
+    let onResizeCommit: () -> Void
+    let onResizeCancel: () -> Void
+
+    static let resizeHandleHeight: CGFloat = 18
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -601,12 +797,42 @@ private struct WeeklyTimelineEventBlock: View {
         .padding(.vertical, 6)
         .frame(width: width, height: height, alignment: .topLeading)
         .background(Color(calendarHex: event.colorHex).opacity(0.18))
+        .overlay {
+            EventTouchCaptureView(
+                minimumDuration: longPressDuration,
+                onTap: onTap,
+                onMoveBegan: onMoveStart,
+                onMoveChanged: onMoveChange,
+                onMoveEnded: { _ in onMoveCommit() },
+                onMoveCancelled: onMoveCancel
+            )
+        }
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(Color(calendarHex: event.colorHex))
                 .frame(width: 4)
         }
+        .overlay(alignment: .bottom) {
+            VStack(spacing: 4) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.18))
+                    .frame(width: min(28, max(width - 16, 12)), height: 4)
+
+                PanCaptureView(
+                    onBegan: onResizeStart,
+                    onChanged: onResizeChange,
+                    onEnded: { _ in onResizeCommit() },
+                    onCancelled: onResizeCancel
+                )
+                .frame(maxWidth: .infinity, minHeight: Self.resizeHandleHeight, maxHeight: Self.resizeHandleHeight)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isActive ? Color.accentColor.opacity(0.7) : Color.clear, lineWidth: 2)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: isActive ? Color.accentColor.opacity(0.18) : .clear, radius: 8, y: 2)
     }
 
     private var timeRange: String {
@@ -851,6 +1077,169 @@ private struct LongPressCaptureView: UIViewRepresentable {
     }
 }
 
+private struct EventTouchCaptureView: UIViewRepresentable {
+    let minimumDuration: TimeInterval
+    let onTap: () -> Void
+    let onMoveBegan: (CGPoint) -> Void
+    let onMoveChanged: (CGPoint) -> Void
+    let onMoveEnded: (CGPoint) -> Void
+    let onMoveCancelled: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onTap: onTap,
+            onMoveBegan: onMoveBegan,
+            onMoveChanged: onMoveChanged,
+            onMoveEnded: onMoveEnded,
+            onMoveCancelled: onMoveCancelled
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let tapRecognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap(_:))
+        )
+
+        let longPressRecognizer = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleLongPress(_:))
+        )
+        longPressRecognizer.minimumPressDuration = minimumDuration
+        longPressRecognizer.allowableMovement = 18
+        longPressRecognizer.cancelsTouchesInView = true
+
+        tapRecognizer.require(toFail: longPressRecognizer)
+
+        view.addGestureRecognizer(tapRecognizer)
+        view.addGestureRecognizer(longPressRecognizer)
+
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        guard let longPressRecognizer = uiView.gestureRecognizers?.compactMap({ $0 as? UILongPressGestureRecognizer }).first else {
+            return
+        }
+        longPressRecognizer.minimumPressDuration = minimumDuration
+    }
+
+    final class Coordinator: NSObject {
+        private let onTap: () -> Void
+        private let onMoveBegan: (CGPoint) -> Void
+        private let onMoveChanged: (CGPoint) -> Void
+        private let onMoveEnded: (CGPoint) -> Void
+        private let onMoveCancelled: () -> Void
+
+        init(
+            onTap: @escaping () -> Void,
+            onMoveBegan: @escaping (CGPoint) -> Void,
+            onMoveChanged: @escaping (CGPoint) -> Void,
+            onMoveEnded: @escaping (CGPoint) -> Void,
+            onMoveCancelled: @escaping () -> Void
+        ) {
+            self.onTap = onTap
+            self.onMoveBegan = onMoveBegan
+            self.onMoveChanged = onMoveChanged
+            self.onMoveEnded = onMoveEnded
+            self.onMoveCancelled = onMoveCancelled
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            onTap()
+        }
+
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            let point = recognizer.location(in: recognizer.view)
+
+            switch recognizer.state {
+            case .began:
+                onMoveBegan(point)
+            case .changed:
+                onMoveChanged(point)
+            case .ended:
+                onMoveEnded(point)
+            case .cancelled, .failed:
+                onMoveCancelled()
+            default:
+                break
+            }
+        }
+    }
+}
+
+private struct PanCaptureView: UIViewRepresentable {
+    let onBegan: (CGPoint) -> Void
+    let onChanged: (CGPoint) -> Void
+    let onEnded: (CGPoint) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onBegan: onBegan,
+            onChanged: onChanged,
+            onEnded: onEnded,
+            onCancelled: onCancelled
+        )
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let recognizer = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePan(_:))
+        )
+        recognizer.cancelsTouchesInView = true
+        view.addGestureRecognizer(recognizer)
+
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    final class Coordinator: NSObject {
+        private let onBegan: (CGPoint) -> Void
+        private let onChanged: (CGPoint) -> Void
+        private let onEnded: (CGPoint) -> Void
+        private let onCancelled: () -> Void
+
+        init(
+            onBegan: @escaping (CGPoint) -> Void,
+            onChanged: @escaping (CGPoint) -> Void,
+            onEnded: @escaping (CGPoint) -> Void,
+            onCancelled: @escaping () -> Void
+        ) {
+            self.onBegan = onBegan
+            self.onChanged = onChanged
+            self.onEnded = onEnded
+            self.onCancelled = onCancelled
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            let point = recognizer.location(in: recognizer.view)
+
+            switch recognizer.state {
+            case .began:
+                onBegan(point)
+            case .changed:
+                onChanged(point)
+            case .ended:
+                onEnded(point)
+            case .cancelled, .failed:
+                onCancelled()
+            default:
+                break
+            }
+        }
+    }
+}
+
 private struct ObservableScrollView<Content: View>: View {
     let bridge: WeeklyScrollViewBridge
     let onScrollViewResolved: (UIScrollView) -> Void
@@ -928,6 +1317,19 @@ private enum WeeklyAutoScrollDirection: Hashable {
 private struct WeeklyGuideInteraction {
     let point: CGPoint
     let fallbackIndex: Int
+}
+
+private struct WeeklyEventInteraction {
+    let eventID: Int64
+    let originalEvent: CalendarEvent
+    var previewEvent: CalendarEvent
+    let mode: WeeklyEventInteractionMode
+    var fallbackIndex: Int
+}
+
+private enum WeeklyEventInteractionMode {
+    case move(anchorMinutes: Int)
+    case resize
 }
 
 private final class WeeklyScrollViewBridge {
@@ -1033,5 +1435,37 @@ private extension UIView {
         RootContentView(dependencies: dependencies)
     } else {
         Text("Preview unavailable")
+    }
+}
+
+private extension CalendarEvent {
+    func updating(startAt: Date) -> CalendarEvent {
+        CalendarEvent(
+            id: id,
+            eventTypeId: eventTypeId,
+            customTitle: customTitle,
+            customColorHex: customColorHex,
+            title: title,
+            colorHex: colorHex,
+            startAt: startAt,
+            durationMinutes: durationMinutes,
+            reminderMinutes: reminderMinutes,
+            note: note
+        )
+    }
+
+    func updating(durationMinutes: Int) -> CalendarEvent {
+        CalendarEvent(
+            id: id,
+            eventTypeId: eventTypeId,
+            customTitle: customTitle,
+            customColorHex: customColorHex,
+            title: title,
+            colorHex: colorHex,
+            startAt: startAt,
+            durationMinutes: durationMinutes,
+            reminderMinutes: reminderMinutes,
+            note: note
+        )
     }
 }
