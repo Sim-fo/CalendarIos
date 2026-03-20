@@ -143,101 +143,110 @@ struct WeeklyView: View {
     private var weeklyTimeline: some View {
         let timelineHeight = hourHeight * 24
 
-        return ScrollView(.horizontal, showsIndicators: true) {
-            VStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    Color.clear
-                        .frame(width: timeColumnWidth, height: 52)
-
-                    ForEach(viewModel.sections) { section in
-                        WeeklyDayHeader(
-                            section: section,
-                            calendar: calendar,
-                            width: dayColumnWidth,
-                            onAddTap: { viewModel.openNewEvent(on: section.date) }
-                        )
-                    }
-                }
-                .background(CalendarColor.cardBackground)
-
-                ObservableScrollView(
-                    bridge: verticalScrollBridge,
-                    onScrollViewResolved: { scrollView in
-                        hasResolvedScrollView = true
-                        scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
-                        logger.debug("Resolved scrollView: \(scrollViewDebugText)")
-                    },
-                    content: {
-                        HStack(alignment: .top, spacing: 0) {
-                            TimeColumnView(
+        return ZStack(alignment: .topLeading) {
+            ScrollView(.horizontal, showsIndicators: true) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        ForEach(viewModel.sections) { section in
+                            WeeklyDayHeader(
+                                section: section,
                                 calendar: calendar,
-                                hourHeight: hourHeight,
-                                width: timeColumnWidth
+                                width: dayColumnWidth,
+                                onAddTap: { viewModel.openNewEvent(on: section.date) }
                             )
-
-                            ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
-                                WeeklyTimelineDayColumn(
-                                    section: section,
-                                    sectionIndex: index,
-                                    dayCount: viewModel.sections.count,
-                                    calendar: calendar,
-                                    width: dayColumnWidth,
-                                    hourHeight: hourHeight,
-                                    timelineHeight: timelineHeight,
-                                    selectionSlotMinutes: selectionSlotMinutes,
-                                    longPressDuration: longPressDuration,
-                                    guideState: guideState,
-                                    scrollOffsetY: timelineScrollOffset,
-                                    onGuideStart: { point in
-                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
-                                        withAnimation(.easeOut(duration: 0.12)) {
-                                            guideState = makeGuideState(from: point, fallbackIndex: index)
-                                        }
-                                    },
-                                    onGuideChange: { point in
-                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
-                                        guideState = makeGuideState(from: point, fallbackIndex: index)
-                                    },
-                                    onGuideCommit: { point in
-                                        guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
-                                        let quantized = makeGuideState(from: point, fallbackIndex: index)
-                                        guideInteraction = nil
-                                        withAnimation(.easeOut(duration: 0.12)) {
-                                            guideState = nil
-                                        }
-                                        viewModel.openNewEvent(at: quantized.date)
-                                    },
-                                    onGuideCancel: {
-                                        guideInteraction = nil
-                                        withAnimation(.easeOut(duration: 0.12)) {
-                                            guideState = nil
-                                        }
-                                    },
-                                    onEventTap: viewModel.openEditor(for:)
-                                )
-                            }
                         }
-                    },
-                    onOffsetChange: { newOffset in
-                        timelineScrollOffset = newOffset
-                        if let scrollView = verticalScrollBridge.scrollView {
-                            scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
-                        }
-                        refreshGuideStateIfNeeded()
-                    },
-                    onViewportHeightChange: { viewportHeight in
-                        verticalViewportHeight = viewportHeight
                     }
-                )
+
+                    ObservableScrollView(
+                        bridge: verticalScrollBridge,
+                        onScrollViewResolved: { scrollView in
+                            hasResolvedScrollView = true
+                            scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
+                            logger.debug("Resolved scrollView: \(scrollViewDebugText)")
+                        },
+                        content: {
+                            HStack(alignment: .top, spacing: 0) {
+                                ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
+                                    WeeklyTimelineDayColumn(
+                                        section: section,
+                                        sectionIndex: index,
+                                        dayCount: viewModel.sections.count,
+                                        calendar: calendar,
+                                        width: dayColumnWidth,
+                                        hourHeight: hourHeight,
+                                        timelineHeight: timelineHeight,
+                                        selectionSlotMinutes: selectionSlotMinutes,
+                                        longPressDuration: longPressDuration,
+                                        guideState: guideState,
+                                        scrollOffsetY: timelineScrollOffset,
+                                        onGuideStart: { point in
+                                            guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
+                                            withAnimation(.easeOut(duration: 0.12)) {
+                                                guideState = makeGuideState(from: point, fallbackIndex: index)
+                                            }
+                                        },
+                                        onGuideChange: { point in
+                                            guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
+                                            guideState = makeGuideState(from: point, fallbackIndex: index)
+                                        },
+                                        onGuideCommit: { point in
+                                            guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
+                                            let quantized = makeGuideState(from: point, fallbackIndex: index)
+                                            guideInteraction = nil
+                                            withAnimation(.easeOut(duration: 0.12)) {
+                                                guideState = nil
+                                            }
+                                            viewModel.openNewEvent(at: quantized.date)
+                                        },
+                                        onGuideCancel: {
+                                            guideInteraction = nil
+                                            withAnimation(.easeOut(duration: 0.12)) {
+                                                guideState = nil
+                                            }
+                                        },
+                                        onEventTap: viewModel.openEditor(for:)
+                                    )
+                                }
+                            }
+                        },
+                        onOffsetChange: { newOffset in
+                            timelineScrollOffset = newOffset
+                            if let scrollView = verticalScrollBridge.scrollView {
+                                scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
+                            }
+                            refreshGuideStateIfNeeded()
+                        },
+                        onViewportHeightChange: { viewportHeight in
+                            verticalViewportHeight = viewportHeight
+                        }
+                    )
+                }
+                .padding(.leading, timeColumnWidth)
             }
-            .background(CalendarColor.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .padding(.bottom, 8)
+
+            VStack(spacing: 0) {
+                TimeColumnHeaderPlaceholder(width: timeColumnWidth, height: 52)
+
+                GeometryReader { proxy in
+                    TimeColumnView(
+                        calendar: calendar,
+                        hourHeight: hourHeight,
+                        width: timeColumnWidth
+                    )
+                    .frame(height: timelineHeight, alignment: .top)
+                    .offset(y: -timelineScrollOffset)
+                    .clipped()
+                }
+                .frame(width: timeColumnWidth)
+            }
         }
+        .background(CalendarColor.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -404,6 +413,22 @@ private struct TimeColumnView: View {
         let components = DateComponents(calendar: calendar, hour: hour, minute: 0)
         let date = calendar.date(from: components) ?? Date()
         return CalendarDateFormatter.time(for: date, calendar: calendar)
+    }
+}
+
+private struct TimeColumnHeaderPlaceholder: View {
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(uiColor: .tertiarySystemGroupedBackground))
+            .frame(width: width, height: height)
+            .overlay(alignment: .trailing) {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(width: 1)
+            }
     }
 }
 
