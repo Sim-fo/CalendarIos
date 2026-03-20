@@ -1,9 +1,7 @@
 import Foundation
-import OSLog
 
 @MainActor
 final class WeeklyViewModel: ObservableObject {
-    private let logger = Logger(subsystem: "com.simfogames.calendarios", category: "weekly-flow")
     @Published private(set) var weekStart: Date
     @Published private(set) var weekTitle: String = ""
     @Published private(set) var sections: [WeekDaySection] = []
@@ -125,12 +123,10 @@ final class WeeklyViewModel: ObservableObject {
             return
         }
 
-        logger.debug("inline-update begin id=\(original.id) from=\(Self.debugDate(original.startAt)) dur=\(original.durationMinutes) to=\(Self.debugDate(updated.startAt)) dur=\(updated.durationMinutes)")
         errorMessage = nil
         applyOptimisticUpdate(updated, replacing: original.id)
         latestInlineMutationID += 1
         let mutationID = latestInlineMutationID
-        logger.debug("inline-update optimistic id=\(updated.id) mutation=\(mutationID) now=\(Self.debugDate(updated.startAt)) dur=\(updated.durationMinutes)")
 
         Task {
             do {
@@ -138,19 +134,11 @@ final class WeeklyViewModel: ObservableObject {
                 draft.startAt = updated.startAt
                 draft.durationMinutes = updated.durationMinutes
                 _ = try await eventRepository.upsert(draft)
-                guard mutationID == latestInlineMutationID else {
-                    self.logger.debug("inline-update stale-success ignored id=\(updated.id) mutation=\(mutationID)")
-                    return
-                }
-                self.logger.debug("inline-update saved id=\(updated.id) mutation=\(mutationID) start=\(Self.debugDate(updated.startAt)) dur=\(updated.durationMinutes)")
+                guard mutationID == latestInlineMutationID else { return }
                 await reloadWeek()
             } catch {
-                guard mutationID == latestInlineMutationID else {
-                    self.logger.debug("inline-update stale-failure ignored id=\(updated.id) mutation=\(mutationID)")
-                    return
-                }
+                guard mutationID == latestInlineMutationID else { return }
                 errorMessage = error.localizedDescription
-                self.logger.error("inline-update failed id=\(updated.id) mutation=\(mutationID) error=\(error.localizedDescription)")
                 await reloadWeek()
             }
         }
@@ -177,7 +165,6 @@ final class WeeklyViewModel: ObservableObject {
             let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart
             let interval = DateInterval(start: weekStart, end: weekEnd)
             let events = try await eventRepository.events(in: interval)
-            logger.debug("reload-week fetched count=\(events.count)")
             let grouped = Dictionary(grouping: events) { event in
                 calendar.startOfDay(for: event.startAt)
             }
@@ -189,11 +176,6 @@ final class WeeklyViewModel: ObservableObject {
                     isToday: calendar.isDateInToday(day),
                     events: grouped[day, default: []]
                 )
-            }
-            for section in sections {
-                for event in section.events {
-                    logger.debug("reload-week event id=\(event.id) day=\(Self.debugDate(section.date)) start=\(Self.debugDate(event.startAt)) dur=\(event.durationMinutes)")
-                }
             }
             weekTitle = CalendarDateFormatter.weekTitle(for: weekStart, calendar: calendar)
         } catch {
@@ -242,11 +224,5 @@ final class WeeklyViewModel: ObservableObject {
         components.minute = (minutes / step) * step
         components.second = 0
         return calendar.date(from: components) ?? date
-    }
-
-    private static func debugDate(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
     }
 }

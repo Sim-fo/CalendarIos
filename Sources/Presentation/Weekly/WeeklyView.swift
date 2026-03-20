@@ -1,9 +1,7 @@
 import SwiftUI
 import UIKit
-import OSLog
 
 struct WeeklyView: View {
-    private let logger = Logger(subsystem: "com.simfogames.calendarios", category: "weekly-debug")
     @ObservedObject var viewModel: WeeklyViewModel
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
@@ -11,8 +9,6 @@ struct WeeklyView: View {
     @State private var activeEventInteraction: WeeklyEventInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
     @State private var verticalViewportHeight: CGFloat = 0
-    @State private var hasResolvedScrollView = false
-    @State private var scrollViewDebugText = "unresolved"
     private let verticalScrollBridge = WeeklyScrollViewBridge()
 
     private let hourHeight: CGFloat = 72
@@ -99,17 +95,11 @@ struct WeeklyView: View {
             }
             .task(id: autoScrollDirection) {
                 guard let direction = autoScrollDirection else { return }
-                logger.debug("Auto-scroll task started: \(String(describing: direction))")
 
                 while !Task.isCancelled && autoScrollDirection == direction && guideInteraction != nil {
                     scrollTimeline(in: direction, step: autoScrollStep)
                     try? await Task.sleep(for: .milliseconds(16))
                 }
-
-                logger.debug("Auto-scroll task ended")
-            }
-            .onChange(of: autoScrollDirection) { _, newDirection in
-                logger.debug("Edge direction changed: \(String(describing: newDirection))")
             }
         }
     }
@@ -163,11 +153,7 @@ struct WeeklyView: View {
 
                     ObservableScrollView(
                         bridge: verticalScrollBridge,
-                        onScrollViewResolved: { scrollView in
-                            hasResolvedScrollView = true
-                            scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
-                            logger.debug("Resolved scrollView: \(scrollViewDebugText)")
-                        },
+                        onScrollViewResolved: { _ in },
                         content: {
                             HStack(alignment: .top, spacing: 0) {
                                 ForEach(Array(displayedSections.enumerated()), id: \.element.id) { index, section in
@@ -231,9 +217,6 @@ struct WeeklyView: View {
                         },
                         onOffsetChange: { newOffset in
                             timelineScrollOffset = newOffset
-                            if let scrollView = verticalScrollBridge.scrollView {
-                                scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
-                            }
                             refreshGuideStateIfNeeded()
                         },
                         onViewportHeightChange: { viewportHeight in
@@ -291,7 +274,6 @@ struct WeeklyView: View {
     private func beginEventMove(for event: CalendarEvent, fallbackIndex: Int) {
         let resolvedEvent = latestEvent(for: event.id) ?? event
         let resolvedDayIndex = dayIndex(for: resolvedEvent.startAt) ?? fallbackIndex
-        logger.debug("move begin id=\(resolvedEvent.id) dayIndex=\(resolvedDayIndex) start=\(debugDate(resolvedEvent.startAt)) dur=\(resolvedEvent.durationMinutes)")
         activeEventInteraction = WeeklyEventInteraction(
             eventID: resolvedEvent.id,
             originalEvent: resolvedEvent,
@@ -326,7 +308,6 @@ struct WeeklyView: View {
         let startAt = date(for: targetDayIndex, minuteOfDay: startMinute)
 
         interaction.previewEvent = baseEvent.updating(startAt: startAt)
-        logger.debug("move preview id=\(interaction.previewEvent.id) dayIndex=\(targetDayIndex) start=\(debugDate(startAt)) dur=\(interaction.previewEvent.durationMinutes)")
         interaction.fallbackIndex = targetDayIndex
         activeEventInteraction = interaction
     }
@@ -334,7 +315,6 @@ struct WeeklyView: View {
     private func beginEventResize(for event: CalendarEvent, fallbackIndex: Int) {
         let resolvedEvent = latestEvent(for: event.id) ?? event
         let preview = resolvedEvent.updating(durationMinutes: max(minimumEventDurationMinutes, resolvedEvent.durationMinutes))
-        logger.debug("resize begin id=\(resolvedEvent.id) start=\(debugDate(resolvedEvent.startAt)) dur=\(resolvedEvent.durationMinutes)")
         activeEventInteraction = WeeklyEventInteraction(
             eventID: resolvedEvent.id,
             originalEvent: resolvedEvent,
@@ -360,13 +340,11 @@ struct WeeklyView: View {
         let duration = (originalDurationMinutes + durationDelta).clamped(to: minimumEventDurationMinutes...maxDuration)
 
         interaction.previewEvent = interaction.previewEvent.updating(durationMinutes: duration)
-        logger.debug("resize preview id=\(interaction.previewEvent.id) start=\(debugDate(interaction.previewEvent.startAt)) dur=\(duration)")
         activeEventInteraction = interaction
     }
 
     private func commitActiveEventInteraction() {
         guard let interaction = activeEventInteraction else { return }
-        logger.debug("interaction commit id=\(interaction.previewEvent.id) start=\(debugDate(interaction.previewEvent.startAt)) dur=\(interaction.previewEvent.durationMinutes)")
         viewModel.applyInlineUpdate(from: interaction.originalEvent, to: interaction.previewEvent)
         activeEventInteraction = nil
     }
@@ -423,12 +401,6 @@ struct WeeklyView: View {
         }
     }
 
-    private func debugDate(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
-    }
-
     private var autoScrollDirection: WeeklyAutoScrollDirection? {
         guard let interaction = guideInteraction, verticalViewportHeight > 0 else {
             return nil
@@ -480,10 +452,7 @@ struct WeeklyView: View {
     }
 
     private func scrollTimeline(in direction: WeeklyAutoScrollDirection, step: CGFloat) {
-        guard let scrollView = verticalScrollBridge.scrollView else {
-            logger.debug("scrollTimeline skipped: no resolved UIScrollView")
-            return
-        }
+        guard let scrollView = verticalScrollBridge.scrollView else { return }
 
         let currentOffset = scrollView.contentOffset.y
         let maxOffset = max(scrollView.contentSize.height - scrollView.bounds.height, 0)
@@ -491,15 +460,10 @@ struct WeeklyView: View {
         let targetOffset = max(0, min(currentOffset + delta, maxOffset))
         let appliedDelta = targetOffset - currentOffset
 
-        guard abs(targetOffset - currentOffset) > .ulpOfOne else {
-            logger.debug("scrollTimeline no-op: dir=\(String(describing: direction)) current=\(Int(currentOffset)) max=\(Int(maxOffset))")
-            return
-        }
+        guard abs(targetOffset - currentOffset) > .ulpOfOne else { return }
 
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetOffset), animated: false)
         timelineScrollOffset = targetOffset
-        scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
-        logger.debug("scrollTimeline applied: dir=\(String(describing: direction)) from=\(Int(currentOffset)) to=\(Int(targetOffset)) max=\(Int(maxOffset))")
         if let interaction = guideInteraction {
             guideInteraction = WeeklyGuideInteraction(
                 point: CGPoint(x: interaction.point.x, y: interaction.point.y + appliedDelta),
