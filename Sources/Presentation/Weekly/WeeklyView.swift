@@ -145,7 +145,7 @@ struct WeeklyView: View {
 
     private var weeklyTimeline: some View {
         let timelineHeight = hourHeight * 24
-        let displayedSections = resolvedSections
+        let displayedSections = viewModel.sections
 
         return ZStack(alignment: .topLeading) {
             ScrollView(.horizontal, showsIndicators: true) {
@@ -184,6 +184,7 @@ struct WeeklyView: View {
                                         guideState: guideState,
                                         scrollOffsetY: timelineScrollOffset,
                                         activeEventID: activeEventInteraction?.eventID,
+                                        previewEvent: activeEventInteraction?.previewEvent,
                                         onGuideStart: { point in
                                             guideInteraction = WeeklyGuideInteraction(point: point, fallbackIndex: index)
                                             withAnimation(.easeOut(duration: 0.12)) {
@@ -280,35 +281,6 @@ struct WeeklyView: View {
         )
     }
 
-    private var resolvedSections: [WeekDaySection] {
-        guard let interaction = activeEventInteraction else {
-            return viewModel.sections
-        }
-
-        return viewModel.sections.map { section in
-            var events = section.events.filter { $0.id != interaction.eventID }
-            if calendar.isDate(interaction.previewEvent.startAt, inSameDayAs: section.date) {
-                events.append(interaction.previewEvent)
-                events.sort { lhs, rhs in
-                    if lhs.startAt == rhs.startAt {
-                        if lhs.durationMinutes == rhs.durationMinutes {
-                            return lhs.id < rhs.id
-                        }
-                        return lhs.durationMinutes < rhs.durationMinutes
-                    }
-                    return lhs.startAt < rhs.startAt
-                }
-            }
-
-            return WeekDaySection(
-                id: section.id,
-                date: section.date,
-                isToday: section.isToday,
-                events: events
-            )
-        }
-    }
-
     private var deleteAction: (() -> Void)? {
         guard viewModel.editorDraft.id != nil else {
             return nil
@@ -317,15 +289,18 @@ struct WeeklyView: View {
     }
 
     private func beginEventMove(for event: CalendarEvent, fallbackIndex: Int) {
+        let resolvedEvent = latestEvent(for: event.id) ?? event
+        let resolvedDayIndex = dayIndex(for: resolvedEvent.startAt) ?? fallbackIndex
+        logger.debug("move begin id=\(resolvedEvent.id) dayIndex=\(resolvedDayIndex) start=\(debugDate(resolvedEvent.startAt)) dur=\(resolvedEvent.durationMinutes)")
         activeEventInteraction = WeeklyEventInteraction(
-            eventID: event.id,
-            originalEvent: event,
-            previewEvent: event,
+            eventID: resolvedEvent.id,
+            originalEvent: resolvedEvent,
+            previewEvent: resolvedEvent,
             mode: .move(
-                originalDayIndex: fallbackIndex,
-                originalStartMinute: minuteOfDay(for: event.startAt)
+                originalDayIndex: resolvedDayIndex,
+                originalStartMinute: minuteOfDay(for: resolvedEvent.startAt)
             ),
-            fallbackIndex: fallbackIndex
+            fallbackIndex: resolvedDayIndex
         )
     }
 
@@ -345,22 +320,26 @@ struct WeeklyView: View {
         let dayShift = Int((translation.x / dayColumnWidth).rounded())
         let minuteShift = quantizedDeltaMinutes(from: translation.y)
         let targetDayIndex = (originalDayIndex + dayShift).clamped(to: 0...max(viewModel.sections.count - 1, 0))
-        let maxStartMinute = max((24 * 60) - event.durationMinutes, 0)
+        let baseEvent = interaction.originalEvent
+        let maxStartMinute = max((24 * 60) - baseEvent.durationMinutes, 0)
         let startMinute = (originalStartMinute + minuteShift).clamped(to: 0...maxStartMinute)
         let startAt = date(for: targetDayIndex, minuteOfDay: startMinute)
 
-        interaction.previewEvent = event.updating(startAt: startAt)
+        interaction.previewEvent = baseEvent.updating(startAt: startAt)
+        logger.debug("move preview id=\(interaction.previewEvent.id) dayIndex=\(targetDayIndex) start=\(debugDate(startAt)) dur=\(interaction.previewEvent.durationMinutes)")
         interaction.fallbackIndex = targetDayIndex
         activeEventInteraction = interaction
     }
 
     private func beginEventResize(for event: CalendarEvent, fallbackIndex: Int) {
-        let preview = event.updating(durationMinutes: max(minimumEventDurationMinutes, event.durationMinutes))
+        let resolvedEvent = latestEvent(for: event.id) ?? event
+        let preview = resolvedEvent.updating(durationMinutes: max(minimumEventDurationMinutes, resolvedEvent.durationMinutes))
+        logger.debug("resize begin id=\(resolvedEvent.id) start=\(debugDate(resolvedEvent.startAt)) dur=\(resolvedEvent.durationMinutes)")
         activeEventInteraction = WeeklyEventInteraction(
-            eventID: event.id,
-            originalEvent: event,
+            eventID: resolvedEvent.id,
+            originalEvent: resolvedEvent,
             previewEvent: preview,
-            mode: .resize(originalDurationMinutes: event.durationMinutes),
+            mode: .resize(originalDurationMinutes: resolvedEvent.durationMinutes),
             fallbackIndex: fallbackIndex
         )
     }
@@ -381,13 +360,15 @@ struct WeeklyView: View {
         let duration = (originalDurationMinutes + durationDelta).clamped(to: minimumEventDurationMinutes...maxDuration)
 
         interaction.previewEvent = interaction.previewEvent.updating(durationMinutes: duration)
+        logger.debug("resize preview id=\(interaction.previewEvent.id) start=\(debugDate(interaction.previewEvent.startAt)) dur=\(duration)")
         activeEventInteraction = interaction
     }
 
     private func commitActiveEventInteraction() {
         guard let interaction = activeEventInteraction else { return }
-        activeEventInteraction = nil
+        logger.debug("interaction commit id=\(interaction.previewEvent.id) start=\(debugDate(interaction.previewEvent.startAt)) dur=\(interaction.previewEvent.durationMinutes)")
         viewModel.applyInlineUpdate(from: interaction.originalEvent, to: interaction.previewEvent)
+        activeEventInteraction = nil
     }
 
     private func cancelActiveEventInteraction() {
@@ -428,6 +409,24 @@ struct WeeklyView: View {
     private func minuteOfDay(for date: Date) -> Int {
         let components = calendar.dateComponents([.hour, .minute], from: date)
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    }
+
+    private func latestEvent(for eventID: Int64) -> CalendarEvent? {
+        viewModel.sections
+            .flatMap(\.events)
+            .first { $0.id == eventID }
+    }
+
+    private func dayIndex(for date: Date) -> Int? {
+        viewModel.sections.firstIndex { section in
+            calendar.isDate(section.date, inSameDayAs: date)
+        }
+    }
+
+    private func debugDate(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     private var autoScrollDirection: WeeklyAutoScrollDirection? {
@@ -607,6 +606,7 @@ private struct WeeklyTimelineDayColumn: View {
     let guideState: WeeklySelectionGuide?
     let scrollOffsetY: CGFloat
     let activeEventID: Int64?
+    let previewEvent: CalendarEvent?
     let onGuideStart: (CGPoint) -> Void
     let onGuideChange: (CGPoint) -> Void
     let onGuideCommit: (CGPoint) -> Void
@@ -692,6 +692,29 @@ private struct WeeklyTimelineDayColumn: View {
                     onResizeCancel: onEventInteractionCancel
                 )
                 .offset(x: layout.x, y: layout.y)
+                .opacity(activeEventID == layout.event.id ? 0.001 : 1)
+            }
+
+            if let previewLayout {
+                WeeklyTimelineEventBlock(
+                    event: previewLayout.event,
+                    calendar: calendar,
+                    width: previewLayout.width,
+                    height: previewLayout.height,
+                    isActive: true,
+                    longPressDuration: longPressDuration,
+                    onTap: {},
+                    onMoveStart: {},
+                    onMoveChange: { _ in },
+                    onMoveCommit: {},
+                    onMoveCancel: {},
+                    onResizeStart: {},
+                    onResizeChange: { _ in },
+                    onResizeCommit: {},
+                    onResizeCancel: {}
+                )
+                .offset(x: previewLayout.x, y: previewLayout.y)
+                .allowsHitTesting(false)
             }
         }
         .frame(width: width, height: timelineHeight, alignment: .topLeading)
@@ -733,6 +756,21 @@ private struct WeeklyTimelineDayColumn: View {
             columnWidth: width,
             hourHeight: hourHeight
         )
+    }
+
+    private var previewLayout: WeeklyTimelineEventLayout? {
+        guard let previewEvent else { return nil }
+        guard activeEventID == previewEvent.id else { return nil }
+        guard calendar.isDate(previewEvent.startAt, inSameDayAs: section.date) else { return nil }
+
+        let previewEvents = section.events.filter { $0.id != previewEvent.id } + [previewEvent]
+        return WeeklyTimelineEventLayout.make(
+            events: previewEvents,
+            calendar: calendar,
+            columnWidth: width,
+            hourHeight: hourHeight
+        )
+        .first(where: { $0.id == previewEvent.id })
     }
 
     private func date(at yOffset: CGFloat) -> Date {
