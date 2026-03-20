@@ -1,14 +1,18 @@
 import SwiftUI
 import UIKit
+import OSLog
 
 struct WeeklyView: View {
+    private let logger = Logger(subsystem: "com.simfogames.calendarios", category: "weekly-debug")
     @ObservedObject var viewModel: WeeklyViewModel
     private let calendar: Calendar
     @State private var guideState: WeeklySelectionGuide?
     @State private var guideInteraction: WeeklyGuideInteraction?
     @State private var timelineScrollOffset: CGFloat = 0
     @State private var verticalViewportHeight: CGFloat = 0
-    @StateObject private var verticalScrollBridge = WeeklyScrollViewBridge()
+    @State private var hasResolvedScrollView = false
+    @State private var scrollViewDebugText = "unresolved"
+    private let verticalScrollBridge = WeeklyScrollViewBridge()
 
     private let hourHeight: CGFloat = 72
     private let timeColumnWidth: CGFloat = 58
@@ -57,6 +61,7 @@ struct WeeklyView: View {
                     .transition(.opacity)
                     .zIndex(10)
                 }
+
             }
             .navigationTitle("Weekly")
             .navigationBarTitleDisplayMode(.inline)
@@ -91,11 +96,17 @@ struct WeeklyView: View {
             }
             .task(id: autoScrollDirection) {
                 guard let direction = autoScrollDirection else { return }
+                logger.debug("Auto-scroll task started: \(String(describing: direction))")
 
                 while !Task.isCancelled && autoScrollDirection == direction && guideInteraction != nil {
                     scrollTimeline(in: direction, step: autoScrollStep)
                     try? await Task.sleep(for: .milliseconds(16))
                 }
+
+                logger.debug("Auto-scroll task ended")
+            }
+            .onChange(of: autoScrollDirection) { _, newDirection in
+                logger.debug("Edge direction changed: \(String(describing: newDirection))")
             }
         }
     }
@@ -151,6 +162,11 @@ struct WeeklyView: View {
 
                 ObservableScrollView(
                     bridge: verticalScrollBridge,
+                    onScrollViewResolved: { scrollView in
+                        hasResolvedScrollView = true
+                        scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
+                        logger.debug("Resolved scrollView: \(scrollViewDebugText)")
+                    },
                     content: {
                         HStack(alignment: .top, spacing: 0) {
                             TimeColumnView(
@@ -204,6 +220,9 @@ struct WeeklyView: View {
                     },
                     onOffsetChange: { newOffset in
                         timelineScrollOffset = newOffset
+                        if let scrollView = verticalScrollBridge.scrollView {
+                            scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
+                        }
                         refreshGuideStateIfNeeded()
                     },
                     onViewportHeightChange: { viewportHeight in
@@ -291,7 +310,10 @@ struct WeeklyView: View {
     }
 
     private func scrollTimeline(in direction: WeeklyAutoScrollDirection, step: CGFloat) {
-        guard let scrollView = verticalScrollBridge.scrollView else { return }
+        guard let scrollView = verticalScrollBridge.scrollView else {
+            logger.debug("scrollTimeline skipped: no resolved UIScrollView")
+            return
+        }
 
         let currentOffset = scrollView.contentOffset.y
         let maxOffset = max(scrollView.contentSize.height - scrollView.bounds.height, 0)
@@ -299,10 +321,15 @@ struct WeeklyView: View {
         let targetOffset = max(0, min(currentOffset + delta, maxOffset))
         let appliedDelta = targetOffset - currentOffset
 
-        guard abs(targetOffset - currentOffset) > .ulpOfOne else { return }
+        guard abs(targetOffset - currentOffset) > .ulpOfOne else {
+            logger.debug("scrollTimeline no-op: dir=\(String(describing: direction)) current=\(Int(currentOffset)) max=\(Int(maxOffset))")
+            return
+        }
 
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetOffset), animated: false)
         timelineScrollOffset = targetOffset
+        scrollViewDebugText = "bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) offset=\(Int(scrollView.contentOffset.y))"
+        logger.debug("scrollTimeline applied: dir=\(String(describing: direction)) from=\(Int(currentOffset)) to=\(Int(targetOffset)) max=\(Int(maxOffset))")
         if let interaction = guideInteraction {
             guideInteraction = WeeklyGuideInteraction(
                 point: CGPoint(x: interaction.point.x, y: interaction.point.y + appliedDelta),
@@ -445,9 +472,10 @@ private struct WeeklyTimelineDayColumn: View {
             ForEach(eventLayouts) { layout in
                 WeeklyTimelineEventBlock(
                     event: layout.event,
-                    calendar: calendar
+                    calendar: calendar,
+                    width: layout.width,
+                    height: layout.height
                 )
-                .frame(width: layout.width, height: layout.height, alignment: .topLeading)
                 .offset(x: layout.x, y: layout.y)
                 .onTapGesture {
                     onEventTap(layout.event)
@@ -523,6 +551,8 @@ private struct WeeklyTimelineDayColumn: View {
 private struct WeeklyTimelineEventBlock: View {
     let event: CalendarEvent
     let calendar: Calendar
+    let width: CGFloat
+    let height: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -544,6 +574,7 @@ private struct WeeklyTimelineEventBlock: View {
         .foregroundStyle(.primary)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+        .frame(width: width, height: height, alignment: .topLeading)
         .background(Color(calendarHex: event.colorHex).opacity(0.18))
         .overlay(alignment: .leading) {
             Rectangle()
@@ -797,17 +828,20 @@ private struct LongPressCaptureView: UIViewRepresentable {
 
 private struct ObservableScrollView<Content: View>: View {
     let bridge: WeeklyScrollViewBridge
+    let onScrollViewResolved: (UIScrollView) -> Void
     let content: () -> Content
     let onOffsetChange: (CGFloat) -> Void
     let onViewportHeightChange: (CGFloat) -> Void
 
     init(
         bridge: WeeklyScrollViewBridge,
+        onScrollViewResolved: @escaping (UIScrollView) -> Void,
         @ViewBuilder content: @escaping () -> Content,
         onOffsetChange: @escaping (CGFloat) -> Void,
         onViewportHeightChange: @escaping (CGFloat) -> Void
     ) {
         self.bridge = bridge
+        self.onScrollViewResolved = onScrollViewResolved
         self.content = content
         self.onOffsetChange = onOffsetChange
         self.onViewportHeightChange = onViewportHeightChange
@@ -841,6 +875,7 @@ private struct ObservableScrollView<Content: View>: View {
         .background(
             ScrollViewResolverView { scrollView in
                 bridge.scrollView = scrollView
+                onScrollViewResolved(scrollView)
             }
         )
     }
@@ -870,7 +905,7 @@ private struct WeeklyGuideInteraction {
     let fallbackIndex: Int
 }
 
-private final class WeeklyScrollViewBridge: ObservableObject {
+private final class WeeklyScrollViewBridge {
     weak var scrollView: UIScrollView?
 }
 
@@ -878,51 +913,92 @@ private struct ScrollViewResolverView: UIViewRepresentable {
     let onResolve: (UIScrollView) -> Void
 
     func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        view.backgroundColor = .clear
-
-        DispatchQueue.main.async {
-            if let scrollView = view.enclosingVerticalScrollView() {
-                onResolve(scrollView)
-            }
-        }
-
-        return view
+        ResolverUIView(onResolve: onResolve)
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            if let scrollView = uiView.enclosingVerticalScrollView() {
-                onResolve(scrollView)
-            }
+        if let resolverView = uiView as? ResolverUIView {
+            resolverView.onResolve = onResolve
+            resolverView.resolveIfNeeded()
         }
     }
 }
 
+private final class ResolverUIView: UIView {
+    var onResolve: (UIScrollView) -> Void
+
+    init(onResolve: @escaping (UIScrollView) -> Void) {
+        self.onResolve = onResolve
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        resolveIfNeeded()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        resolveIfNeeded()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        resolveIfNeeded()
+    }
+
+    func resolveIfNeeded() {
+        guard let scrollView = resolvedWeeklyVerticalScrollView() else { return }
+        onResolve(scrollView)
+    }
+}
+
 private extension UIView {
-    func enclosingVerticalScrollView() -> UIScrollView? {
-        var current: UIView? = superview
-        var candidates: [UIScrollView] = []
-
-        while let view = current {
-            if let scrollView = view as? UIScrollView {
-                scrollView.layoutIfNeeded()
-                candidates.append(scrollView)
-            }
-            current = view.superview
+    func resolvedWeeklyVerticalScrollView() -> UIScrollView? {
+        var root: UIView = self
+        while let parent = root.superview {
+            root = parent
         }
 
-        if let scrollingCandidate = candidates.first(where: {
-            $0.alwaysBounceVertical || $0.contentSize.height > ($0.bounds.height + 1)
+        let allScrollViews = root.allDescendantScrollViews()
+
+        let verticalCandidates = allScrollViews.filter { scrollView in
+            scrollView.layoutIfNeeded()
+            let contentHeight = scrollView.contentSize.height
+            let boundsHeight = scrollView.bounds.height
+            return contentHeight > boundsHeight + 1 || scrollView.alwaysBounceVertical
+        }
+
+        if let bestVertical = verticalCandidates.max(by: { lhs, rhs in
+            (lhs.contentSize.height - lhs.bounds.height) < (rhs.contentSize.height - rhs.bounds.height)
         }) {
-            return scrollingCandidate
+            return bestVertical
         }
 
-        if let fallbackVertical = candidates.first(where: { !$0.alwaysBounceHorizontal }) {
-            return fallbackVertical
+        return allScrollViews.last
+    }
+
+    func allDescendantScrollViews() -> [UIScrollView] {
+        var result: [UIScrollView] = []
+
+        func collect(from view: UIView) {
+            if let scrollView = view as? UIScrollView {
+                result.append(scrollView)
+            }
+            for subview in view.subviews {
+                collect(from: subview)
+            }
         }
 
-        return candidates.first
+        collect(from: self)
+        return result
     }
 }
 
