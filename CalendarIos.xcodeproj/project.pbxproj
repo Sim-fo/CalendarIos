@@ -18,6 +18,8 @@
 		4F64A2232A34E598204EDE3E /* DatabaseMigratorFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47E12D4EC4E76F981AB2B294 /* DatabaseMigratorFactory.swift */; };
 		5A618396026379DCE7564A28 /* EventTypeRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 572899F88E1221285D7E8265 /* EventTypeRecord.swift */; };
 		5BD0380CD9BA710AD22F8801 /* EventEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3CECE045FB82ABA01F95F01 /* EventEditorView.swift */; };
+		5C5A9A8F0011223344556677 /* AppShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5A9A8E0011223344556677 /* AppShellView.swift */; };
+		5C5A9A910011223344556677 /* PlaceholderFeatureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5A9A900011223344556677 /* PlaceholderFeatureView.swift */; };
 		66F95CB0C16AB2F6D4D56DFF /* WeekDaySection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8119C1E816904ACBE45571D /* WeekDaySection.swift */; };
 		815525136A6EDC8A4F7527B8 /* WeeklyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2FA4FA56022F9C858C0A67F /* WeeklyViewModel.swift */; };
 		82688F8971EA91424FD85B2A /* DateFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081D9969892103ACA5F00AE9 /* DateFormatting.swift */; };
@@ -43,6 +45,8 @@
 		7AFB7A3B353B5DBB7FCECC91 /* CalendarIos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CalendarIos.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7C8928F03F7E1AF584DA1ABA /* EventTypeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventTypeRepository.swift; sourceTree = "<group>"; };
 		7F176A87D48ACAF4D90D9271 /* WeeklyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeeklyView.swift; sourceTree = "<group>"; };
+		5C5A9A8E0011223344556677 /* AppShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellView.swift; sourceTree = "<group>"; };
+		5C5A9A900011223344556677 /* PlaceholderFeatureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceholderFeatureView.swift; sourceTree = "<group>"; };
 		9046D6277003BBF38A7D9411 /* EventType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventType.swift; sourceTree = "<group>"; };
 		9B827863A01A811BADC0448E /* CalendarEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarEvent.swift; sourceTree = "<group>"; };
 		B2FA4FA56022F9C858C0A67F /* WeeklyViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeeklyViewModel.swift; sourceTree = "<group>"; };
@@ -85,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				57E66C99AC9F6E02A00BDCB2 /* EventEditor */,
+				5C5A9A8D0011223344556677 /* Shell */,
 				60EAB94FBE4734F91F1F2419 /* Weekly */,
 			);
 			path = Presentation;
@@ -167,6 +172,15 @@
 				D3CECE045FB82ABA01F95F01 /* EventEditorView.swift */,
 			);
 			path = EventEditor;
+			sourceTree = "<group>";
+		};
+		5C5A9A8D0011223344556677 /* Shell */ = {
+			isa = PBXGroup;
+			children = (
+				5C5A9A8E0011223344556677 /* AppShellView.swift */,
+				5C5A9A900011223344556677 /* PlaceholderFeatureView.swift */,
+			);
+			path = Shell;
 			sourceTree = "<group>";
 		};
 		60EAB94FBE4734F91F1F2419 /* Weekly */ = {
@@ -300,10 +314,12 @@
 				5BD0380CD9BA710AD22F8801 /* EventEditorView.swift in Sources */,
 				E41D625FC16B5B72409B3463 /* EventRecord.swift in Sources */,
 				4E3FDF4F53561C86DF96C013 /* EventRepository.swift in Sources */,
+				5C5A9A8F0011223344556677 /* AppShellView.swift in Sources */,
 				3840358B245DB5DF1F30016C /* EventType.swift in Sources */,
 				5A618396026379DCE7564A28 /* EventTypeRecord.swift in Sources */,
 				915805D8E9C0E8A4CA98D44E /* EventTypeRepository.swift in Sources */,
 				A8BAE566C915EC9F4AA9E789 /* GRDBEventRepository.swift in Sources */,
+				5C5A9A910011223344556677 /* PlaceholderFeatureView.swift in Sources */,
 				490E83E0AF72C99456D85CCD /* RootContentView.swift in Sources */,
 				66F95CB0C16AB2F6D4D56DFF /* WeekDaySection.swift in Sources */,
 				CCA33899CCBF641E272A8DB9 /* WeeklyView.swift in Sources */,

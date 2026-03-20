@@ -1,19 +1,13 @@
 import SwiftUI
 
 struct RootContentView: View {
-    @StateObject private var viewModel: WeeklyViewModel
+    let dependencies: CalendarDependencies
 
     init(dependencies: CalendarDependencies) {
-        _viewModel = StateObject(
-            wrappedValue: WeeklyViewModel(
-                eventRepository: dependencies.eventRepository,
-                eventTypeRepository: dependencies.eventRepository
-            )
-        )
+        self.dependencies = dependencies
     }
 
     var body: some View {
-        WeeklyView(viewModel: viewModel)
+        AppShellView(dependencies: dependencies)
     }
 }
-
