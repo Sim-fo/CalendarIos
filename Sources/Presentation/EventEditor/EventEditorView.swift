@@ -11,35 +11,39 @@ struct EventEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Basics") {
-                    TextField("Title", text: $draft.customTitle)
+                Section("editor.basics") {
+                    TextField("editor.title_placeholder", text: $draft.customTitle)
 
-                    Picker("Event type", selection: $draft.eventTypeId) {
-                        Text("No type").tag(Optional<Int64>.none)
+                    Picker("editor.event_type", selection: $draft.eventTypeId) {
+                        Text("editor.no_type").tag(Optional<Int64>.none)
                         ForEach(eventTypes) { eventType in
                             Text(eventType.title).tag(Optional(eventType.id))
                         }
                     }
                 }
 
-                Section("Schedule") {
+                Section("editor.schedule") {
                     DatePicker(
-                        "Start",
+                        "editor.start",
                         selection: $draft.startAt,
                         displayedComponents: [.date, .hourAndMinute]
                     )
 
                     Stepper(value: $draft.durationMinutes, in: 15...720, step: 15) {
-                        Text("Duration: \(draft.durationMinutes) min")
+                        Text(String(format: String(localized: "editor.duration_minutes"), draft.durationMinutes))
                     }
 
                     Stepper(value: $draft.reminderMinutes, in: 0...180, step: 5) {
-                        Text(reminderLabel)
+                        if draft.reminderMinutes == 0 {
+                            Text("editor.no_reminder")
+                        } else {
+                            Text(String(format: String(localized: "editor.reminder_minutes"), draft.reminderMinutes))
+                        }
                     }
                 }
 
-                Section("Appearance") {
-                    Picker("Color", selection: customColorBinding) {
+                Section("editor.appearance") {
+                    Picker("editor.color", selection: customColorBinding) {
                         ForEach(CalendarColor.presetColors, id: \.self) { colorHex in
                             HStack {
                                 Circle()
@@ -52,26 +56,26 @@ struct EventEditorView: View {
                     }
                 }
 
-                Section("Notes") {
-                    TextField("Optional note", text: $draft.note, axis: .vertical)
+                Section("editor.notes") {
+                    TextField("editor.note_placeholder", text: $draft.note, axis: .vertical)
                         .lineLimit(3...6)
                 }
 
                 if let onDelete {
                     Section {
-                        Button("Delete event", role: .destructive, action: onDelete)
+                        Button("editor.delete_event", role: .destructive, action: onDelete)
                     }
                 }
             }
-            .navigationTitle(draft.id == nil ? "New event" : "Edit event")
+            .navigationTitle(draft.id == nil ? LocalizedStringKey("editor.new_title") : LocalizedStringKey("editor.edit_title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel", action: onCancel)
+                    Button("common.cancel", action: onCancel)
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save", action: onSave)
+                    Button("common.save", action: onSave)
                         .disabled(isSaving || !canSave)
                 }
             }
@@ -87,10 +91,6 @@ struct EventEditorView: View {
 
     private var canSave: Bool {
         draft.customTitle.nilIfBlank != nil || draft.eventTypeId != nil
-    }
-
-    private var reminderLabel: String {
-        draft.reminderMinutes == 0 ? "No reminder" : "Reminder: \(draft.reminderMinutes) min before"
     }
 
     private func colorName(for hex: Int) -> String {

@@ -1,8 +1,9 @@
 import SwiftUI
 
 struct PlaceholderFeatureView: View {
-    let title: String
-    let subtitle: String
+    private let titleText: Text
+    private let subtitleText: Text
+    private let navigationTitleText: Text
     let systemImage: String
     private let showsNavigationChrome: Bool
 
@@ -12,8 +13,22 @@ struct PlaceholderFeatureView: View {
         systemImage: String,
         showsNavigationChrome: Bool = true
     ) {
-        self.title = title
-        self.subtitle = subtitle
+        self.titleText = Text(title)
+        self.subtitleText = Text(subtitle)
+        self.navigationTitleText = Text(title)
+        self.systemImage = systemImage
+        self.showsNavigationChrome = showsNavigationChrome
+    }
+
+    init(
+        titleKey: LocalizedStringKey,
+        subtitleKey: LocalizedStringKey,
+        systemImage: String,
+        showsNavigationChrome: Bool = true
+    ) {
+        self.titleText = Text(titleKey)
+        self.subtitleText = Text(subtitleKey)
+        self.navigationTitleText = Text(titleKey)
         self.systemImage = systemImage
         self.showsNavigationChrome = showsNavigationChrome
     }
@@ -40,10 +55,10 @@ struct PlaceholderFeatureView: View {
                     .font(.system(size: 44))
                     .foregroundStyle(.tint)
 
-                Text(title)
+                titleText
                     .font(.title2.weight(.semibold))
 
-                Text(subtitle)
+                subtitleText
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -59,19 +74,19 @@ struct PlaceholderFeatureView: View {
             )
             .padding(.horizontal, 24)
         }
-        .modifier(NavigationChromeModifier(enabled: showsNavigationChrome, title: title))
+        .modifier(NavigationChromeModifier(enabled: showsNavigationChrome, titleText: navigationTitleText))
     }
 }
 
 private struct NavigationChromeModifier: ViewModifier {
     let enabled: Bool
-    let title: String
+    let titleText: Text
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if enabled {
             content
-                .navigationTitle(title)
+                .navigationTitle(titleText)
                 .navigationBarTitleDisplayMode(.inline)
         } else {
             content

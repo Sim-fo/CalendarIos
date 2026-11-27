@@ -9,6 +9,9 @@ struct EventDraft: Equatable, Sendable {
     var durationMinutes: Int
     var reminderMinutes: Int
     var note: String
+    var audioNotePath: String?
+    var selectedOptionId: Int64?
+    var selectedOptionName: String?
 
     static func empty(on date: Date, calendar: Calendar = .current) -> EventDraft {
         EventDraft(
@@ -31,7 +34,10 @@ struct EventDraft: Equatable, Sendable {
         startAt: Date,
         durationMinutes: Int,
         reminderMinutes: Int,
-        note: String
+        note: String,
+        audioNotePath: String? = nil,
+        selectedOptionId: Int64? = nil,
+        selectedOptionName: String? = nil
     ) {
         self.id = id
         self.eventTypeId = eventTypeId
@@ -41,6 +47,9 @@ struct EventDraft: Equatable, Sendable {
         self.durationMinutes = durationMinutes
         self.reminderMinutes = reminderMinutes
         self.note = note
+        self.audioNotePath = audioNotePath
+        self.selectedOptionId = selectedOptionId
+        self.selectedOptionName = selectedOptionName
     }
 
     init(event: CalendarEvent) {
@@ -52,6 +61,8 @@ struct EventDraft: Equatable, Sendable {
         durationMinutes = event.durationMinutes
         reminderMinutes = event.reminderMinutes
         note = event.note ?? ""
+        audioNotePath = event.audioNotePath
+        selectedOptionId = event.selectedOptionId
+        selectedOptionName = event.selectedOptionName
     }
 }
-

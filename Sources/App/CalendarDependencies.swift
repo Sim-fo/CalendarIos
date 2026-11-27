@@ -1,12 +1,14 @@
 import Foundation
 
-final class CalendarDependencies {
+final class CalendarDependencies: @unchecked Sendable {
     let database: AppDatabase
     let eventRepository: GRDBEventRepository
+    let featureRepository: GRDBFeatureRepository
 
     init(database: AppDatabase, calendar: Calendar = .current) {
         self.database = database
         self.eventRepository = GRDBEventRepository(dbWriter: database.dbWriter, calendar: calendar)
+        self.featureRepository = GRDBFeatureRepository(dbWriter: database.dbWriter)
     }
 
     static func live() throws -> CalendarDependencies {
@@ -30,7 +32,7 @@ final class CalendarDependencies {
                 id: nil,
                 title: "Focus",
                 defaultDurationMinutes: 90,
-                colorHex: 0xFF3A7AFE,
+                colorHex: 0xFF8FBDF5,
                 notifyBeforeMinutes: 10,
                 lastModifiedMillis: now
             )
@@ -38,7 +40,7 @@ final class CalendarDependencies {
                 id: nil,
                 title: "Workout",
                 defaultDurationMinutes: 60,
-                colorHex: 0xFF11A36A,
+                colorHex: 0xFF99C79B,
                 notifyBeforeMinutes: 15,
                 lastModifiedMillis: now
             )
@@ -51,7 +53,7 @@ final class CalendarDependencies {
                 EventRecord(
                     id: nil,
                     eventTypeId: focus.id,
-                    customTitle: "Planning block",
+                    customTitle: nil,
                     customColorHex: nil,
                     startAtMillis: calendar.dateBySettingHour(9, minute: 0, on: weekStart).millisecondsSince1970,
                     durationMinutes: 90,

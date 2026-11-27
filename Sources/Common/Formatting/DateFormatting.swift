@@ -55,13 +55,44 @@ enum CalendarDateFormatter {
         return "\(start) - \(end)"
     }
 
-    static func time(for date: Date, calendar: Calendar) -> String {
+    static func shortDate(for date: Date, calendar: Calendar) -> String {
         let formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.locale = calendar.locale ?? .current
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
+        formatter.dateFormat = "d MMM"
+        return formatter.string(from: date)
+    }
+
+    static func longDate(for date: Date, calendar: Calendar) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateStyle = .long
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+
+    static func monthYear(for date: Date, calendar: Calendar) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = "LLLL yyyy"
+        return formatter.string(from: date).capitalized
+    }
+
+    static func year(for date: Date, calendar: Calendar) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = "yyyy"
+        return formatter.string(from: date)
+    }
+
+    static func time(for date: Date, calendar: Calendar, use24h: Bool = true) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = calendar.locale ?? .current
+        formatter.dateFormat = use24h ? "HH:mm" : "h:mm a"
         return formatter.string(from: date)
     }
 }
-

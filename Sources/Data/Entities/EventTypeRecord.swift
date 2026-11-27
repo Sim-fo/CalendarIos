@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-struct EventTypeRecord: Codable, FetchableRecord, MutablePersistableRecord, TableRecord {
+struct EventTypeRecord: Codable, FetchableRecord, MutablePersistableRecord, TableRecord, Sendable {
     static let databaseTableName = "event_types"
 
     var id: Int64?
@@ -10,6 +10,10 @@ struct EventTypeRecord: Codable, FetchableRecord, MutablePersistableRecord, Tabl
     var colorHex: Int
     var notifyBeforeMinutes: Int
     var lastModifiedMillis: Int64
+
+    mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
 }
 
 extension EventTypeRecord {
@@ -24,4 +28,3 @@ extension EventTypeRecord {
         )
     }
 }
-
